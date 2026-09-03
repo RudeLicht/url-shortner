@@ -27,7 +27,7 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    return {"Message": "Backend is running"}
+    return {"status": "ok"}
 
 
 app.include_router(url_router, prefix="/api/v1/url", tags=["url"])

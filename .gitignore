@@ -1,2 +1,82 @@
-__pycache__
-.env
+# =========================
+# Backend / Python
+# =========================
+
+# Environment variables
+/backend/.env
+/backend/.env.*
+
+# Virtual environment
+/backend/.venv/
+
+# Python cache
+/backend/__pycache__/
+/backend/**/__pycache__/
+/backend/**/*.py[cod]
+
+# =========================
+# Frontend / Node / Next.js
+# =========================
+
+# Dependencies
+/frontend/node_modules/
+
+# Next.js
+/frontend/.next/
+/frontend/out/
+
+# Production build
+/frontend/build/
+/frontend/dist/
+
+# Environment variables
+/frontend/.env
+/frontend/.env.local
+/frontend/.env.development.local
+/frontend/.env.test.local
+/frontend/.env.production.local
+
+# Testing
+/frontend/coverage/
+
+# Debug logs
+/frontend/npm-debug.log*
+/frontend/yarn-debug.log*
+/frontend/yarn-error.log*
+/frontend/pnpm-debug.log*
+
+# TypeScript
+/frontend/*.tsbuildinfo
+/frontend/next-env.d.ts
+
+# Vercel
+/frontend/.vercel/
+
+# Yarn
+/frontend/.pnp
+/frontend/.pnp.*
+/frontend/.yarn/*
+!/frontend/.yarn/patches
+!/frontend/.yarn/plugins
+!/frontend/.yarn/releases
+!/frontend/.yarn/versions
+
+# =========================
+# IDE
+# =========================
+
+.vscode/
+.idea/
+
+# =========================
+# OS
+# =========================
+
+.DS_Store
+Thumbs.db
+
+# =========================
+# Misc
+# =========================
+
+*.pem
