@@ -1,16 +1,24 @@
+import os
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers.url import router as url_router
 
-app = FastAPI()
+load_dotenv()
+is_production = os.getenv("ENVIRONMENT") == "production"
 
-origins = [
-    "http://localhost:3000",
-]
+origin = os.getenv("ORIGIN")
+
+
+app = FastAPI(
+    docs_url=None if is_production else "/docs",
+    redoc_url=None if is_production else "/redoc",
+)
+
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=origin,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
