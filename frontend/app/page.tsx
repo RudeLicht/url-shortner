@@ -4,14 +4,16 @@ import { useEffect, useState } from "react";
 
 export default function Home() {
   const [status, setStatus] = useState("Checking...");
+  const BACKEND_API = process.env.NEXT_PUBLIC_BACKEND_URL;
 
   useEffect(() => {
-    fetch(`${process.env.NEXT_PUBLIC_BACKEND_URL}/`)
+    fetch(`${BACKEND_API}/`)
       .then((res) => res.json())
       .then((data) => setStatus(data.status))
       .catch(() => setStatus("Backend unavailable"));
-  }, []);
-  console.log("API URL:", process.env.NEXT_PUBLIC_BACKEND_URL);
+  }, [BACKEND_API]);
+
+  console.log("API URL:", BACKEND_API);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950">
