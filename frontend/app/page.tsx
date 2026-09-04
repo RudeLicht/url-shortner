@@ -13,8 +13,6 @@ export default function Home() {
       .catch(() => setStatus("Backend unavailable"));
   }, [BACKEND_API]);
 
-  console.log("API URL:", BACKEND_API);
-
   return (
     <main className="flex min-h-screen items-center justify-center bg-slate-950">
       <div className="text-center">
