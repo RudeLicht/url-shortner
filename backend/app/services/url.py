@@ -15,7 +15,6 @@ def shorten_url(url: str, session: Session):
         existing_url = session.query(Url).filter(Url.url == url).first()
 
         if existing_url is not None:
-            print(">>> RETURNING 409")
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={"message": "URL already shortened"},
