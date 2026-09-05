@@ -14,18 +14,12 @@ def shorten_url(url: str, session: Session):
     try:
         existing_url = session.query(Url).filter(Url.url == url).first()
 
-        print("url:", repr(url))
-        print("existing_url:", repr(existing_url))
-        print("is None:", existing_url is None)
-
         if existing_url is not None:
             print(">>> RETURNING 409")
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
                 content={"message": "URL already shortened"},
             )
-
-        print(">>> CONTINUING")
 
         url_model = Url(url=url, code="")
 
@@ -48,11 +42,6 @@ def shorten_url(url: str, session: Session):
 
     except IntegrityError as e:
         session.rollback()
-
-        print("INTEGRITY ERROR:")
-        print("type:", type(e))
-        print("error:", e)
-        print("orig:", e.orig)
 
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
