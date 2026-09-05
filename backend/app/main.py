@@ -2,7 +2,7 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers.url import router as url_router
+from app.routes.url import router as url_router
 
 load_dotenv()
 is_production = os.getenv("ENVIRONMENT") == "production"
