@@ -30,6 +30,11 @@ class Url(Base):
         nullable=False,
     )
 
+    expiry: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
     stats: Mapped["UrlStats"] = relationship(
         back_populates="url",
         uselist=False,
@@ -54,11 +59,6 @@ class UrlStats(Base):
     clicks: Mapped[int] = mapped_column(
         default=0,
         nullable=False,
-    )
-
-    expiry: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
     )
 
     url: Mapped["Url"] = relationship(
