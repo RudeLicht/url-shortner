@@ -1,30 +1,46 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from app.services.url import shorten_url, get_url_information, delete_url_function, get_url_stats_function
+from app.services.url import (
+    delete_url_function,
+    get_url_information,
+    get_url_stats_function,
+    shorten_url,
+    update_url_expiry,
+)
 from app.db import get_db
-from app.schemas.url import UrlRequest
+from app.schemas.url import (
+    UrlCreateResponse,
+    UrlRequest,
+    UrlResponse,
+    UrlStatsResponse,
+    UrlUpdateRequest,
+)
 
 router = APIRouter()
 
 
-@router.post("/")
+@router.post("/", response_model=UrlCreateResponse, status_code=201)
 async def post_url(data: UrlRequest, session: Session = Depends(get_db)):
-    return shorten_url(data.url, session)
+    return shorten_url(data.url, data.expiry, session)
 
 
-@router.get("/{code}")
+@router.patch("/{code}", response_model=UrlStatsResponse)
+async def patch_url_stats(
+    code: str,
+    data: UrlUpdateRequest,
+    session: Session = Depends(get_db),
+):
+    return update_url_expiry(code, data, session)
+
+
+@router.get("/{code}", response_model=UrlResponse)
 async def get_url(code: str, session: Session = Depends(get_db)):
     return get_url_information(code, session)
 
 
-@router.get("/stats/{code}")
+@router.get("/stats/{code}", response_model=UrlStatsResponse)
 async def get_url_stats(code: str, session: Session = Depends(get_db)):
     return get_url_stats_function(code, session)
-
-
-@router.patch("/stats/{code}")
-async def patch_url_stats(code: str, session: Session = Depends(get_db)):
-    return None
 
 
 @router.delete("/{code}")

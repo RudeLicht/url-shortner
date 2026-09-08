@@ -1,4 +1,5 @@
 import base62
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -8,19 +9,50 @@ from fastapi import status
 from fastapi.responses import JSONResponse, Response
 
 from app.models.url import Url, UrlStats
+from app.schemas.url import (
+    ErrorResponse,
+    UrlCreateResponse,
+    UrlResponse,
+    UrlStatsResponse,
+    UrlUpdateRequest,
+)
 
 
-def shorten_url(url: str, session: Session):
+def _normalize_expiry(expiry: datetime | None) -> datetime | None:
+    if expiry is None:
+        return None
+
+    if expiry.tzinfo is None:
+        return expiry.replace(tzinfo=timezone.utc)
+
+    return expiry.astimezone(timezone.utc)
+
+
+def shorten_url(
+    url: str,
+    expiry: datetime | None,
+    session: Session,
+) -> UrlCreateResponse | JSONResponse:
     try:
+        expiry = _normalize_expiry(expiry)
+
         existing_url = session.query(Url).filter(Url.url == url).first()
 
         if existing_url is not None:
             return JSONResponse(
                 status_code=status.HTTP_409_CONFLICT,
-                content={"message": "URL already shortened"},
+                content=ErrorResponse(message="URL already shortened").model_dump(),
             )
 
-        url_model = Url(url=url, code="")
+        if expiry is not None and expiry <= datetime.now(timezone.utc):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content=ErrorResponse(
+                    message="Expiry must be in the future"
+                ).model_dump(),
+            )
+
+        url_model = Url(url=url, code="", expiry=expiry)
 
         session.add(url_model)
 
@@ -31,33 +63,34 @@ def shorten_url(url: str, session: Session):
 
         session.commit()
 
-        return JSONResponse(
-            status_code=status.HTTP_201_CREATED,
-            content={
-                "url": url_model.url,
-                "short_url": url_model.code,
-            },
+        return UrlCreateResponse(
+            url=url_model.url,
+            code=url_model.code,
+            expiry=url_model.expiry,
         )
 
-    except IntegrityError as e:
+    except IntegrityError:
         session.rollback()
 
         return JSONResponse(
             status_code=status.HTTP_409_CONFLICT,
-            content={"message": "URL already shortened"},
+            content=ErrorResponse(message="URL already shortened").model_dump(),
         )
 
-    except Exception as e:
+    except Exception as error:
         session.rollback()
-        print(e)
+        print(error)
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"message": "Error shortening the URL"},
+            content=ErrorResponse(message="Error shortening the URL").model_dump(),
         )
 
 
-def get_url_information(url_code: str, session: Session):
+def get_url_information(
+    url_code: str,
+    session: Session,
+) -> UrlResponse | JSONResponse:
     try:
         url_model = session.execute(
             select(Url).where(Url.code == url_code)
@@ -66,42 +99,44 @@ def get_url_information(url_code: str, session: Session):
         if url_model is None:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "URL not found"},
+                content=ErrorResponse(message="URL not found").model_dump(),
             )
 
         if url_model.stats is None:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "URL stats not found"},
+                content=ErrorResponse(message="URL stats not found").model_dump(),
             )
+
+        if url_model.expiry is not None:
+            expiry = _normalize_expiry(url_model.expiry)
+            if expiry <= datetime.now(timezone.utc):
+                return JSONResponse(
+                    status_code=status.HTTP_410_GONE,
+                    content=ErrorResponse(message="URL has expired").model_dump(),
+                )
 
         url_model.stats.clicks += 1
 
         session.commit()
 
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "url": url_model.url,
-                "code": url_model.code,
-            },
+        return UrlResponse(
+            url=url_model.url,
+            code=url_model.code,
+            expiry=url_model.expiry,
         )
-        # return RedirectResponse(
-        #     url=url_model.url,
-        #     status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-        # )
 
-    except Exception as e:
+    except Exception as error:
         session.rollback()
-        print(e)
+        print(error)
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"message": "Error fetching URL"},
+            content=ErrorResponse(message="Error fetching URL").model_dump(),
         )
 
 
-def delete_url_function(url_code: str, session: Session):
+def delete_url_function(url_code: str, session: Session) -> Response | JSONResponse:
     try:
         url_model = session.execute(
             select(Url).where(Url.code == url_code)
@@ -110,7 +145,7 @@ def delete_url_function(url_code: str, session: Session):
         if url_model is None:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "URL not found"},
+                content=ErrorResponse(message="URL not found").model_dump(),
             )
 
         session.delete(url_model)
@@ -118,17 +153,20 @@ def delete_url_function(url_code: str, session: Session):
 
         return Response(status_code=status.HTTP_204_NO_CONTENT)
 
-    except Exception as e:
+    except Exception as error:
         session.rollback()
-        print(e)
+        print(error)
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"message": "Error deleting URL"},
+            content=ErrorResponse(message="Error deleting URL").model_dump(),
         )
 
 
-def get_url_stats_function(url_code: str, session: Session):
+def get_url_stats_function(
+    url_code: str,
+    session: Session,
+) -> UrlStatsResponse | JSONResponse:
     try:
         url_model = session.execute(
             select(Url).where(Url.code == url_code)
@@ -137,28 +175,76 @@ def get_url_stats_function(url_code: str, session: Session):
         if url_model is None:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "URL not found"},
+                content=ErrorResponse(message="URL not found").model_dump(),
             )
 
         if url_model.stats is None:
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
-                content={"message": "URL stats not found"},
+                content=ErrorResponse(message="URL stats not found").model_dump(),
             )
 
-        return JSONResponse(
-            status_code=status.HTTP_200_OK,
-            content={
-                "url": url_model.url,
-                "clicks": url_model.stats.clicks,
-            },
+        return UrlStatsResponse(
+            url=url_model.url,
+            clicks=url_model.stats.clicks,
+            expiry=url_model.expiry,
         )
 
-    except Exception as e:
+    except Exception as error:
         session.rollback()
-        print(e)
+        print(error)
 
         return JSONResponse(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"message": "Error getting URL stats"},
+            content=ErrorResponse(message="Error getting URL stats").model_dump(),
+        )
+
+
+def update_url_expiry(
+    url_code: str,
+    data: UrlUpdateRequest,
+    session: Session,
+) -> UrlStatsResponse | JSONResponse:
+    try:
+        url_model = session.execute(
+            select(Url).where(Url.code == url_code)
+        ).scalar_one_or_none()
+
+        if url_model is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=ErrorResponse(message="URL not found").model_dump(),
+            )
+
+        expiry = _normalize_expiry(data.expiry)
+        if expiry is not None and expiry <= datetime.now(timezone.utc):
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content=ErrorResponse(
+                    message="Expiry must be in the future"
+                ).model_dump(),
+            )
+
+        url_model.expiry = expiry
+        session.commit()
+
+        if url_model.stats is None:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content=ErrorResponse(message="URL stats not found").model_dump(),
+            )
+
+        return UrlStatsResponse(
+            url=url_model.url,
+            clicks=url_model.stats.clicks,
+            expiry=url_model.expiry,
+        )
+
+    except Exception as error:
+        session.rollback()
+        print(error)
+
+        return JSONResponse(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content=ErrorResponse(message="Error updating URL expiry").model_dump(),
         )
