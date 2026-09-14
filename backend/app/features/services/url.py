@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 from fastapi import status
 from fastapi.responses import JSONResponse, Response
 
-from app.features.models.url import Url, UrlStats
+from features.models.url import Url, UrlStats
 
 
 def shorten_url(url: str, session: Session):

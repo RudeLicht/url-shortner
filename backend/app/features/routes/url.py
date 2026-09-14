@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
-from app.features.services.url import shorten_url, get_url_information, delete_url_function, get_url_stats_function
-from app.core.database.db import get_db
-from app.features.schemas.url import UrlRequest
+from features.services.url import shorten_url, get_url_information, delete_url_function, get_url_stats_function
+from core.database.db import get_db
+from features.schemas.url import UrlRequest
 
 router = APIRouter()
 
