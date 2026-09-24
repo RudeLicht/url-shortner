@@ -1,4 +1,5 @@
 import base62
+from datetime import datetime, timezone
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -10,8 +11,22 @@ from fastapi.responses import JSONResponse, Response
 from features.models.url import Url, UrlStats
 
 
-def shorten_url(url: str, session: Session):
+def is_expired(expiry: datetime | None) -> bool:
+    if expiry is None:
+        return False
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=timezone.utc)
+    return expiry <= datetime.now(timezone.utc)
+
+
+def shorten_url(url: str, expiry: datetime | None, session: Session):
     try:
+        if expiry is not None and is_expired(expiry):
+            return JSONResponse(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                content={"message": "Expiry must be in the future"},
+            )
+
         existing_url = session.query(Url).filter(Url.url == url).first()
 
         if existing_url is not None:
@@ -20,7 +35,7 @@ def shorten_url(url: str, session: Session):
                 content={"message": "URL already shortened"},
             )
 
-        url_model = Url(url=url, code="")
+        url_model = Url(url=url, code="", expiry=expiry)
 
         session.add(url_model)
 
@@ -36,6 +51,7 @@ def shorten_url(url: str, session: Session):
             content={
                 "url": url_model.url,
                 "short_url": url_model.code,
+                "expiry": url_model.expiry.isoformat() if url_model.expiry else None,
             },
         )
 
@@ -75,6 +91,12 @@ def get_url_information(url_code: str, session: Session):
                 content={"message": "URL stats not found"},
             )
 
+        if is_expired(url_model.expiry):
+            return JSONResponse(
+                status_code=status.HTTP_410_GONE,
+                content={"message": "URL has expired"},
+            )
+
         url_model.stats.clicks += 1
 
         session.commit()
@@ -84,12 +106,9 @@ def get_url_information(url_code: str, session: Session):
             content={
                 "url": url_model.url,
                 "code": url_model.code,
+                "expiry": url_model.expiry.isoformat() if url_model.expiry else None,
             },
         )
-        # return RedirectResponse(
-        #     url=url_model.url,
-        #     status_code=status.HTTP_307_TEMPORARY_REDIRECT,
-        # )
 
     except Exception as e:
         session.rollback()
@@ -151,6 +170,7 @@ def get_url_stats_function(url_code: str, session: Session):
             content={
                 "url": url_model.url,
                 "clicks": url_model.stats.clicks,
+                "expiry": url_model.expiry.isoformat() if url_model.expiry else None,
             },
         )
 

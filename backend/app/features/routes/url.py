@@ -9,7 +9,7 @@ router = APIRouter()
 
 @router.post("/")
 async def post_url(data: UrlRequest, session: Session = Depends(get_db)):
-    return shorten_url(data.url, session)
+    return shorten_url(data.url, data.expiry, session)
 
 
 @router.get("/{code}")
