@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from fastapi import status
 from fastapi.responses import JSONResponse, Response
 
-from features.models.url import Url, UrlStats
+from app.features.models.url import Url, UrlStats
 
 
 def is_expired(expiry: datetime | None) -> bool:

@@ -2,14 +2,13 @@
 
 ## ENDPOINTS
 
-### auth:
+### url:
+- POST -> /api/v1/url/
+- GET -> /api/v1/url/{code}
+- GET -> /api/v1/url/stats/{code}
+- DELETE -> /api/v1/url/{code}
+
+### auth (planned, not yet implemented):
 - POST -> /api/auth/signup
 - POST -> /api/auth/signin
 - GET -> /api/auth/me
-
-### url:
-- POST -> /api/url
-- GET -> /api/url/{id}
-- GET -> /api/url/stats/{id}
-- PATCH -> /api/url/stats/{id}
-- DELETE -> /api/url/{id}
