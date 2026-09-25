@@ -29,10 +29,47 @@ def test_post_url_distinct_codes_for_distinct_urls(client):
 
 
 def test_post_url_duplicate_returns_409(client):
-    client.post("/api/v1/url/", json={"url": "https://example.com"})
+    first = client.post("/api/v1/url/", json={"url": "https://example.com"})
     response = client.post("/api/v1/url/", json={"url": "https://example.com"})
 
     assert response.status_code == 409
+    assert response.json()["code"] == first.json()["short_url"]
+
+
+def test_post_url_duplicate_of_expired_url_returns_201_with_new_code(client, db_session):
+    future = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    created = client.post(
+        "/api/v1/url/", json={"url": "https://example.com", "expiry": future}
+    )
+    old_code = created.json()["short_url"]
+
+    # shorten_url rejects an already-past expiry outright (400), so create
+    # the row with a future expiry via the API, then advance time by
+    # flipping the row directly, same as test_get_url_expired_returns_410.
+    from app.features.models.url import Url
+    from sqlalchemy import select
+
+    url_model = db_session.execute(select(Url).where(Url.code == old_code)).scalar_one()
+    url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    # Create an unrelated URL *after* the expired one so it isn't the max id
+    # in the table -- SQLite (used in tests) would otherwise reuse that id
+    # for the replacement row once the expired one is deleted, masking what
+    # would be a genuinely new id/code on Postgres in production.
+    client.post("/api/v1/url/", json={"url": "https://unrelated.com"})
+
+    response = client.post("/api/v1/url/", json={"url": "https://example.com"})
+
+    assert response.status_code == 201
+    new_code = response.json()["short_url"]
+    assert new_code != old_code
+
+    follow_up_new = client.get(f"/api/v1/url/{new_code}")
+    assert follow_up_new.status_code == 200
+
+    follow_up_old = client.get(f"/api/v1/url/{old_code}")
+    assert follow_up_old.status_code == 404
 
 
 def test_post_url_missing_url_field_returns_422(client):

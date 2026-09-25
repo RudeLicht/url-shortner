@@ -25,6 +25,7 @@ CLAUDE.md
 
 # Next.js
 /frontend/.next/
+/frontend/.next-e2e/
 /frontend/out/
 
 # Production build
@@ -40,6 +41,10 @@ CLAUDE.md
 
 # Testing
 /frontend/coverage/
+/frontend/test-results/
+/frontend/playwright-report/
+/frontend/blob-report/
+/frontend/playwright/.cache/
 
 # Debug logs
 /frontend/npm-debug.log*

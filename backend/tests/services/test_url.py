@@ -1,9 +1,11 @@
+import json
 from datetime import datetime, timedelta, timezone
 
 import base62
 import pytest
 from fastapi import status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from app.features.models.url import Url, UrlStats
 from app.features.services.url import (
@@ -86,13 +88,268 @@ def test_shorten_url_multiple_urls_yield_distinct_codes(db_session):
 
 
 def test_shorten_url_duplicate_url_returns_409(db_session):
-    shorten_url("https://example.com", None, db_session)
+    first = shorten_url("https://example.com", None, db_session)
+    original_code = json.loads(first.body)["short_url"]
+
     response = shorten_url("https://example.com", None, db_session)
 
     assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "URL already shortened", "code": original_code}
 
     rows = db_session.execute(select(Url)).scalars().all()
     assert len(rows) == 1
+
+
+def test_shorten_url_duplicate_of_expired_url_replaces_row_with_new_code(db_session):
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    # The service itself rejects an already-past expiry, so create the
+    # soon-to-be-expired row via the service with a future expiry (giving it
+    # a realistic base62 code), then flip its expiry into the past directly
+    # to simulate a link that was valid when created and has since expired.
+    create_response = shorten_url("https://example.com", future, db_session)
+    old_code = json.loads(create_response.body)["short_url"]
+    old_url_model = db_session.execute(select(Url)).scalar_one()
+    old_id = old_url_model.id
+
+    # Register a couple of clicks so the cascade-delete of the stats row is
+    # actually meaningful (not just deleting an already-empty row).
+    get_url_information(old_code, db_session)
+    get_url_information(old_code, db_session)
+    old_stats_id = old_url_model.stats.id
+
+    old_url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    # Create an unrelated URL *after* the expired one so the expired row is
+    # not the highest id in the table. SQLite (used in these tests) reuses
+    # the max rowid once the row holding it is deleted, since the `id`
+    # column isn't declared with the AUTOINCREMENT keyword. Without this,
+    # the replacement row would coincidentally land on the exact same id
+    # (and therefore the same base62 code) as the row it replaced, masking
+    # what would be a genuinely new id on Postgres in production.
+    shorten_url("https://unrelated.com", None, db_session)
+
+    new_expiry = datetime.now(timezone.utc) + timedelta(days=2)
+    response = shorten_url("https://example.com", new_expiry, db_session)
+
+    assert response.status_code == status.HTTP_201_CREATED
+    payload = json.loads(response.body)
+    new_code = payload["short_url"]
+    assert new_code != old_code
+
+    # The old row -- and its stats row, via cascade -- is gone.
+    assert (
+        db_session.execute(select(Url).where(Url.id == old_id)).scalar_one_or_none()
+        is None
+    )
+    assert (
+        db_session.execute(
+            select(UrlStats).where(UrlStats.id == old_stats_id)
+        ).scalar_one_or_none()
+        is None
+    )
+
+    # Exactly one Url row exists for this url, with exactly one fresh stats
+    # row attached to it.
+    rows = db_session.execute(
+        select(Url).where(Url.url == "https://example.com")
+    ).scalars().all()
+    assert len(rows) == 1
+    new_url_model = rows[0]
+    assert new_url_model.id != old_id
+    assert new_url_model.code == new_code
+    assert new_url_model.code == base62.encode(new_url_model.id)
+
+    stats_rows = db_session.execute(
+        select(UrlStats).where(UrlStats.url_id == new_url_model.id)
+    ).scalars().all()
+    assert len(stats_rows) == 1
+    assert stats_rows[0].clicks == 0
+
+    actual_expiry = new_url_model.expiry
+    assert actual_expiry is not None
+    if actual_expiry.tzinfo is None:
+        actual_expiry = actual_expiry.replace(tzinfo=timezone.utc)
+    assert abs((actual_expiry - new_expiry).total_seconds()) < 1
+
+
+def test_shorten_url_duplicate_url_with_future_expiry_returns_409(db_session):
+    # The boundary of the new "expired duplicate" branch: a live row with a
+    # *future* expiry must still 409 with its existing code, same as a row
+    # with no expiry at all.
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    first = shorten_url("https://example.com", future, db_session)
+    original_code = json.loads(first.body)["short_url"]
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "URL already shortened", "code": original_code}
+
+    rows = db_session.execute(select(Url)).scalars().all()
+    assert len(rows) == 1
+
+
+def test_shorten_url_integrity_error_race_falls_back_to_existing_row(
+    db_session, monkeypatch
+):
+    # Simulate a concurrent insert: the pre-check query misses the row (as if
+    # another request committed it in the gap between the check and the
+    # flush), the flush then hits the unique constraint, and the fallback
+    # re-query inside the except block finds the row that "just" landed.
+    existing = Url(url="https://example.com", code="existing123", expiry=None)
+    db_session.add(existing)
+    db_session.commit()
+
+    real_query = db_session.query
+    calls = {"n": 0}
+
+    class EmptyQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    def fake_query(model):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return EmptyQuery()
+        return real_query(model)
+
+    def fake_flush():
+        raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(db_session, "query", fake_query)
+    monkeypatch.setattr(db_session, "flush", fake_flush)
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "URL already shortened", "code": "existing123"}
+
+
+def test_shorten_url_integrity_error_race_with_expired_row_returns_500(
+    db_session, monkeypatch
+):
+    # Same shape as the race above, but the row the fallback re-query finds
+    # is expired. An expired row isn't a "real" duplicate winning the race,
+    # so this must surface as a 500, not a 409-with-code.
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    existing = Url(url="https://example.com", code="expired123", expiry=past)
+    db_session.add(existing)
+    db_session.commit()
+
+    real_query = db_session.query
+    calls = {"n": 0}
+
+    class EmptyQuery:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def first(self):
+            return None
+
+    def fake_query(model):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return EmptyQuery()
+        return real_query(model)
+
+    def fake_flush():
+        raise IntegrityError("INSERT", {}, Exception("UNIQUE constraint failed"))
+
+    monkeypatch.setattr(db_session, "query", fake_query)
+    monkeypatch.setattr(db_session, "flush", fake_flush)
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    payload = json.loads(response.body)
+    assert payload == {"message": "Error shortening the URL"}
+
+
+def test_shorten_url_failed_replacement_of_expired_row_rolls_back_and_returns_500(
+    db_session, monkeypatch
+):
+    # Unlike the race tests above (which fake `query` so the delete-and-
+    # recreate branch never actually runs), this exercises the real failed-
+    # replacement path: the expired row's DELETE really executes, the
+    # *second* flush (the new row's INSERT) blows up, and the resulting
+    # rollback must restore the original expired row -- not leave the table
+    # empty or half-migrated.
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    create_response = shorten_url("https://example.com", future, db_session)
+    old_code = json.loads(create_response.body)["short_url"]
+    old_url_model = db_session.execute(select(Url)).scalar_one()
+    old_id = old_url_model.id
+
+    get_url_information(old_code, db_session)
+    get_url_information(old_code, db_session)
+    old_stats_id = old_url_model.stats.id
+
+    old_url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    real_flush = db_session.flush
+    calls = {"n": 0}
+
+    def fake_flush(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # The DELETE flush for the expired row: let it really execute.
+            return real_flush(*args, **kwargs)
+        # The INSERT flush for the replacement row: simulate a failure.
+        raise IntegrityError("INSERT", {}, Exception("simulated"))
+
+    monkeypatch.setattr(db_session, "flush", fake_flush)
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    monkeypatch.undo()
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    payload = json.loads(response.body)
+    assert payload == {"message": "Error shortening the URL"}
+
+    rows = db_session.execute(
+        select(Url).where(Url.url == "https://example.com")
+    ).scalars().all()
+    assert len(rows) == 1
+    restored = rows[0]
+    assert restored.id == old_id
+    assert restored.code == old_code
+    assert is_expired(restored.expiry)
+
+    stats = db_session.execute(
+        select(UrlStats).where(UrlStats.id == old_stats_id)
+    ).scalar_one_or_none()
+    assert stats is not None
+    assert stats.clicks == 2
+
+
+def test_shorten_url_integrity_error_without_matching_row_returns_500(
+    db_session, monkeypatch
+):
+    # An IntegrityError not caused by the `url` unique constraint (or one
+    # where the fallback re-query otherwise finds nothing) should surface as
+    # a generic 500 rather than a bogus 409.
+    def fake_flush():
+        raise IntegrityError("INSERT", {}, Exception("some other constraint"))
+
+    monkeypatch.setattr(db_session, "flush", fake_flush)
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    payload = json.loads(response.body)
+    assert payload == {"message": "Error shortening the URL"}
+
+    rows = db_session.execute(select(Url)).scalars().all()
+    assert rows == []
 
 
 def test_shorten_url_with_future_expiry_succeeds(db_session):

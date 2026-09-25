@@ -19,6 +19,16 @@ def is_expired(expiry: datetime | None) -> bool:
     return expiry <= datetime.now(timezone.utc)
 
 
+def _duplicate_url_response(existing_url: Url) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={
+            "message": "URL already shortened",
+            "code": existing_url.code,
+        },
+    )
+
+
 def shorten_url(url: str, expiry: datetime | None, session: Session):
     try:
         if expiry is not None and is_expired(expiry):
@@ -30,10 +40,15 @@ def shorten_url(url: str, expiry: datetime | None, session: Session):
         existing_url = session.query(Url).filter(Url.url == url).first()
 
         if existing_url is not None:
-            return JSONResponse(
-                status_code=status.HTTP_409_CONFLICT,
-                content={"message": "URL already shortened"},
-            )
+            if not is_expired(existing_url.expiry):
+                return _duplicate_url_response(existing_url)
+
+            # Existing row is expired: delete it and flush immediately so the
+            # DELETE is emitted before the new row's INSERT (SQLAlchemy's unit
+            # of work otherwise orders INSERTs before DELETEs within a flush,
+            # which would violate the url UNIQUE constraint).
+            session.delete(existing_url)
+            session.flush()
 
         url_model = Url(url=url, code="", expiry=expiry)
 
@@ -57,10 +72,25 @@ def shorten_url(url: str, expiry: datetime | None, session: Session):
 
     except IntegrityError as e:
         session.rollback()
+        print(e)
+
+        try:
+            existing_url = session.query(Url).filter(Url.url == url).first()
+        except Exception as e:
+            session.rollback()
+            print(e)
+            existing_url = None
+
+        # Only a live row means a concurrent request won the race and
+        # committed first -> 409 with its code. An expired row (or no row)
+        # means our own replacement attempt failed for some other reason,
+        # so it's a genuine error rather than a duplicate.
+        if existing_url is not None and not is_expired(existing_url.expiry):
+            return _duplicate_url_response(existing_url)
 
         return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content={"message": "URL already shortened"},
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            content={"message": "Error shortening the URL"},
         )
 
     except Exception as e:
