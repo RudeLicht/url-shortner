@@ -31,6 +31,12 @@ export default async function CodePage({ params }: CodePageProps) {
       if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
         errorStatus = error.status;
       } else {
+        // Logged server-side (this route runs as a Server Component) so the
+        // actual cause - a backend 500, a network/DNS failure reaching
+        // NEXT_PUBLIC_BACKEND_URL from this container, a bad gateway from a
+        // reverse proxy, etc. - is visible instead of silently collapsing
+        // into the generic "unknown" error state.
+        console.error(`Failed to resolve short code "${code}":`, error);
         errorStatus = "unknown";
       }
     }
