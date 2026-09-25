@@ -2,12 +2,12 @@ import os
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.routers.url import router as url_router
+from app.features.routes.url import router as url_router
 
 load_dotenv()
 is_production = os.getenv("ENVIRONMENT") == "production"
 
-origin = os.getenv("ORIGIN")
+origins = [o.strip() for o in os.getenv("ORIGIN", "").split(",") if o.strip()]
 
 
 app = FastAPI(
@@ -18,7 +18,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origin,
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

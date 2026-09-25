@@ -1,3 +1,5 @@
+CLAUDE.md
+
 # =========================
 # Backend / Python
 # =========================
@@ -23,6 +25,7 @@
 
 # Next.js
 /frontend/.next/
+/frontend/.next-e2e/
 /frontend/out/
 
 # Production build
@@ -38,6 +41,10 @@
 
 # Testing
 /frontend/coverage/
+/frontend/test-results/
+/frontend/playwright-report/
+/frontend/blob-report/
+/frontend/playwright/.cache/
 
 # Debug logs
 /frontend/npm-debug.log*
@@ -67,6 +74,7 @@
 
 .vscode/
 .idea/
+start.txt
 
 # =========================
 # OS
