@@ -1,4 +1,16 @@
-const BASE_URL = process.env.NEXT_PUBLIC_BACKEND_URL;
+// The backend has no public URL. In the browser, calls go to this app's own
+// /api/* route (app/api/[...path]/route.ts), which forwards them privately.
+// Server-side code (e.g. app/[code]) calls the backend directly.
+function getBaseUrl(): string {
+  if (typeof window !== "undefined") {
+    return "";
+  }
+  const backendUrl = process.env.BACKEND_INTERNAL_URL;
+  if (!backendUrl) {
+    throw new Error("BACKEND_INTERNAL_URL is not set");
+  }
+  return backendUrl;
+}
 
 export class ApiError extends Error {
   status: number;
@@ -64,7 +76,7 @@ export async function apiFetch<T>(
 ): Promise<T> {
   const { body, headers, ...rest } = options;
 
-  const response = await fetch(`${BASE_URL}${path}`, {
+  const response = await fetch(`${getBaseUrl()}${path}`, {
     ...rest,
     headers: {
       ...(body !== undefined ? { "Content-Type": "application/json" } : {}),

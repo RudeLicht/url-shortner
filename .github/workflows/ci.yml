@@ -58,8 +58,6 @@ jobs:
         run: npm run test
 
       - name: Build
-        env:
-          NEXT_PUBLIC_BACKEND_URL: http://localhost:8000
         run: npm run build
 
   frontend-e2e:
