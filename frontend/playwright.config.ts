@@ -60,7 +60,7 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 180_000,
       env: {
-        NEXT_PUBLIC_BACKEND_URL: BACKEND_URL,
+        BACKEND_INTERNAL_URL: BACKEND_URL,
         // Build/serve into a separate output dir so this e2e-only build
         // (baked with the throwaway backend URL above) never overwrites a
         // developer's real `.next` build - see next.config.ts.

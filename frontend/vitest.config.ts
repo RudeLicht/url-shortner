@@ -19,7 +19,7 @@ export default defineConfig({
     include: ["tests/**/*.test.{ts,tsx}"],
     css: false,
     env: {
-      NEXT_PUBLIC_BACKEND_URL: "http://backend.test",
+      BACKEND_INTERNAL_URL: "http://backend.test",
     },
   },
 });

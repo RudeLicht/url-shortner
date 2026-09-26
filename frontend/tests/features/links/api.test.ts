@@ -29,7 +29,7 @@ describe("links api request shapes", () => {
 
     const result = await shortenUrl({ url: "https://a.com" });
 
-    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/url/", {
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/url", {
       method: "POST",
       body: { url: "https://a.com" },
     });

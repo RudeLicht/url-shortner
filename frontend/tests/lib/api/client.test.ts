@@ -31,8 +31,23 @@ describe("apiFetch", () => {
 
     expect(result).toEqual({ hello: "world" });
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://backend.test/api/v1/thing",
+      "/api/v1/thing",
       expect.objectContaining({ headers: {} })
+    );
+  });
+
+  it("calls the backend directly via BACKEND_INTERNAL_URL when running on the server", async () => {
+    vi.stubGlobal("window", undefined);
+    const fetchMock = vi.fn().mockResolvedValue(
+      mockResponse({ status: 200, body: JSON.stringify({ hello: "world" }) })
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await apiFetch("/api/v1/thing");
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://backend.test/api/v1/thing",
+      expect.anything()
     );
   });
 
@@ -63,7 +78,7 @@ describe("apiFetch", () => {
     });
 
     expect(fetchMock).toHaveBeenCalledWith(
-      "http://backend.test/api/v1/url/",
+      "/api/v1/url/",
       expect.objectContaining({
         method: "POST",
         headers: { "Content-Type": "application/json" },

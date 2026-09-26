@@ -4,5 +4,8 @@ import { cleanup } from "@testing-library/react";
 
 afterEach(() => {
   cleanup();
-  window.localStorage.clear();
+  // Server-side tests opt into the node environment, which has no window.
+  if (typeof window !== "undefined") {
+    window.localStorage.clear();
+  }
 });
