@@ -104,10 +104,6 @@ export default function HomePage() {
   return (
     <main className="mx-auto flex w-full max-w-3xl flex-1 flex-col gap-16 px-6 py-20 sm:py-28">
       <section className="flex flex-col items-center gap-8 text-center">
-        <div className="flex items-center gap-2 text-sm font-medium text-muted-foreground">
-          <LinkIcon className="size-4" />
-          Shorten
-        </div>
 
         <h1 className="text-balance font-heading text-4xl font-medium tracking-tight sm:text-6xl">
           Shorten your links.
