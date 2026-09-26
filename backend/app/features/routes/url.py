@@ -7,6 +7,9 @@ from app.features.schemas.url import UrlRequest
 router = APIRouter()
 
 
+# "" matches /api/v1/url exactly. Without it, that path gets a 307 to the
+# trailing-slash form, which the frontend proxy's fetch fails to follow for POSTs.
+@router.post("", include_in_schema=False)
 @router.post("/")
 async def post_url(data: UrlRequest, session: Session = Depends(get_db)):
     return shorten_url(data.url, data.expiry, session)

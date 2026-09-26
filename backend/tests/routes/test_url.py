@@ -9,6 +9,15 @@ def test_root_health_route(client):
     assert response.json() == {"status": "ok"}
 
 
+def test_post_url_without_trailing_slash_creates_without_redirect(client):
+    response = client.post(
+        "/api/v1/url", json={"url": "https://example.com"}, follow_redirects=False
+    )
+
+    assert response.status_code == 201
+    assert response.json()["short_url"] == base62.encode(1)
+
+
 def test_post_url_creates_short_url(client):
     response = client.post("/api/v1/url/", json={"url": "https://example.com"})
 
