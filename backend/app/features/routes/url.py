@@ -1,8 +1,14 @@
 from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
-from app.features.services.url import shorten_url, get_url_information, delete_url_function, get_url_stats_function
+from app.features.services.url import (
+    shorten_url,
+    get_url_information,
+    delete_url_function,
+    get_url_stats_function,
+    update_url_function,
+)
 from app.core.database.db import get_db
-from app.features.schemas.url import UrlRequest
+from app.features.schemas.url import UrlRequest, UrlUpdate
 
 router = APIRouter()
 
@@ -12,7 +18,7 @@ router = APIRouter()
 @router.post("", include_in_schema=False)
 @router.post("/")
 async def post_url(data: UrlRequest, session: Session = Depends(get_db)):
-    return shorten_url(data.url, data.expiry, session)
+    return shorten_url(data.url, data.expiry, session, data.alias)
 
 
 @router.get("/{code}")
@@ -32,3 +38,13 @@ async def delete_url(
     session: Session = Depends(get_db),
 ):
     return delete_url_function(code, delete_token, session)
+
+
+@router.patch("/{code}")
+async def patch_url(
+    code: str,
+    data: UrlUpdate,
+    delete_token: str | None = Header(None, alias="X-Delete-Token"),
+    session: Session = Depends(get_db),
+):
+    return update_url_function(code, delete_token, data, session)

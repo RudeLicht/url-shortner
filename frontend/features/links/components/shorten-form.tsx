@@ -9,17 +9,28 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { getExistingCodeFromConflict, shortenUrl } from "@/features/links/api";
+import { Label } from "@/components/ui/label";
+import {
+  getExistingCodeFromConflict,
+  isAliasTakenConflict,
+  shortenUrl,
+} from "@/features/links/api";
+import { isValidAlias } from "@/features/links/alias";
 import { ExpiryPicker } from "@/features/links/components/expiry-picker";
+import { QrCodeDialog } from "@/features/links/components/qr-code-dialog";
 import { combineDateAndTime, resolveExpiry } from "@/features/links/expiry";
 import { addTrackedEntry, buildShortUrl } from "@/features/links/utils";
-import { ApiError } from "@/lib/api/client";
+import { ApiError, getRateLimitMessage } from "@/lib/api/client";
 
 const formSchema = z
   .object({
     url: z.url({
       protocol: /^https?$/,
       error: "Enter a valid http:// or https:// URL",
+    }),
+    alias: z.string().trim().refine((a) => a === "" || isValidAlias(a), {
+      message:
+        "Alias must be 3-20 letters, numbers, - or _, and not a reserved word",
     }),
     expiryPreset: z.enum(["never", "1h", "1d", "7d", "30d", "custom"]),
     customDate: z.date().optional(),
@@ -41,6 +52,7 @@ type FormValues = z.infer<typeof formSchema>;
 
 const DEFAULT_VALUES: FormValues = {
   url: "",
+  alias: "",
   expiryPreset: "never",
   customDate: undefined,
   customTime: "12:00",
@@ -77,21 +89,29 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
     defaultValues: DEFAULT_VALUES,
   });
 
-  const [expiryPreset, customDate, customTime] = useWatch({
+  const [expiryPreset, customDate, customTime, alias] = useWatch({
     control,
-    name: ["expiryPreset", "customDate", "customTime"],
+    name: ["expiryPreset", "customDate", "customTime", "alias"],
   });
+
+  const trimmedAlias = (alias ?? "").trim();
+  const aliasPreview =
+    trimmedAlias.length > 0 && isValidAlias(trimmedAlias)
+      ? buildShortUrl(trimmedAlias)
+      : null;
 
   // Any change to the expiry choice clears its error; it's re-checked on submit.
   const clearExpiryErrors = () => clearErrors(["expiryPreset", "customDate"]);
 
   const onSubmit = async (values: FormValues) => {
     const expiry = toRequestExpiry(values);
+    const trimmedAlias = values.alias.trim();
 
     try {
       const response = await shortenUrl({
         url: values.url,
         expiry: expiry?.toISOString(),
+        alias: trimmedAlias.length > 0 ? trimmedAlias : undefined,
       });
 
       // The frontend and backend deploy independently, so an older backend
@@ -109,7 +129,16 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
       onCreated();
     } catch (error) {
       if (error instanceof ApiError) {
+        const rateLimitMessage = getRateLimitMessage(error);
+        if (rateLimitMessage) {
+          setError("root", { message: rateLimitMessage });
+          return;
+        }
         if (error.status === 409) {
+          if (isAliasTakenConflict(error)) {
+            setError("alias", { message: "That alias is already taken" });
+            return;
+          }
           const existingCode = getExistingCodeFromConflict(error);
           if (existingCode) {
             // A null token here never downgrades a token this browser
@@ -122,19 +151,27 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
             setResult(existingCode);
             setCopied(false);
             onCreated();
+            // The backend checks URL uniqueness before the alias, so a
+            // submitted alias is silently ignored on this path - make sure
+            // that's said explicitly, alongside the expiry note.
+            const expiryNote = expiry
+              ? "The expiry you set wasn't applied - the existing link's expiry was kept."
+              : null;
+            const aliasNote =
+              trimmedAlias.length > 0 && trimmedAlias !== existingCode
+                ? `Your custom alias "${trimmedAlias}" was not created.`
+                : null;
             if (previousEntry) {
+              const description = [expiryNote, aliasNote].filter(Boolean).join(" ");
               toast.info("This URL already has a short link", {
-                description: expiry
-                  ? "The expiry you set wasn't applied - the existing link's expiry was kept."
-                  : undefined,
+                description: description.length > 0 ? description : undefined,
               });
             } else {
+              const description =
+                "It's been added to your list as read-only - you won't be able to delete it." +
+                [expiryNote, aliasNote].map((note) => (note ? ` ${note}` : "")).join("");
               toast.info("This URL was already shortened by someone else", {
-                description:
-                  "It's been added to your list as read-only - you won't be able to delete it." +
-                  (expiry
-                    ? " The expiry you set wasn't applied - the existing link's expiry was kept."
-                    : ""),
+                description,
               });
             }
             return;
@@ -169,32 +206,57 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
 
   return (
     <div className="flex w-full flex-col gap-3">
-      <form
-        onSubmit={handleSubmit(onSubmit)}
-        className="flex flex-col gap-2 sm:flex-row sm:items-start"
-      >
-        <div className="flex-1">
+      <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-3">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start">
+          <div className="flex-1">
+            <Input
+              type="text"
+              placeholder="Paste a long URL..."
+              aria-invalid={!!errors.url}
+              className="h-12 rounded-xl px-4 text-base"
+              {...register("url")}
+            />
+            {errors.url && (
+              <p className="mt-1.5 text-sm text-destructive">
+                {errors.url.message}
+              </p>
+            )}
+          </div>
+          <Button
+            type="submit"
+            size="lg"
+            disabled={isSubmitting}
+            className="h-12 rounded-xl px-6 text-base"
+          >
+            {isSubmitting ? "Shortening..." : "Shorten"}
+          </Button>
+        </div>
+
+        <div>
+          <Label htmlFor="alias">Custom alias</Label>
           <Input
+            id="alias"
             type="text"
-            placeholder="Paste a long URL..."
-            aria-invalid={!!errors.url}
-            className="h-12 rounded-xl px-4 text-base"
-            {...register("url")}
+            placeholder="my-link"
+            aria-invalid={!!errors.alias}
+            className="mt-1"
+            {...register("alias")}
           />
-          {errors.url && (
+          {errors.alias ? (
             <p className="mt-1.5 text-sm text-destructive">
-              {errors.url.message}
+              {errors.alias.message}
+            </p>
+          ) : (
+            <p className="mt-1.5 text-xs text-muted-foreground">
+              Optional, 3-20 letters, numbers, - or _
+            </p>
+          )}
+          {aliasPreview && (
+            <p className="mt-1 font-mono text-xs text-muted-foreground">
+              {aliasPreview}
             </p>
           )}
         </div>
-        <Button
-          type="submit"
-          size="lg"
-          disabled={isSubmitting}
-          className="h-12 rounded-xl px-6 text-base"
-        >
-          {isSubmitting ? "Shortening..." : "Shorten"}
-        </Button>
       </form>
 
       <ExpiryPicker
@@ -225,10 +287,13 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
           <span className="truncate font-mono text-sm text-foreground">
             {buildShortUrl(result)}
           </span>
-          <Button variant="outline" size="sm" type="button" onClick={handleCopy}>
-            {copied ? <CheckIcon /> : <CopyIcon />}
-            {copied ? "Copied" : "Copy"}
-          </Button>
+          <div className="flex shrink-0 items-center gap-1">
+            <QrCodeDialog code={result} />
+            <Button variant="outline" size="sm" type="button" onClick={handleCopy}>
+              {copied ? <CheckIcon /> : <CopyIcon />}
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
         </div>
       )}
     </div>

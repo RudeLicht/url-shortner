@@ -49,6 +49,18 @@ export function isBackendForbidden(err: unknown): boolean {
   return err instanceof ApiError && err.status === 403 && err.isJson;
 }
 
+/**
+ * True when `err` is the proxy's own rate-limit response - a 429 whose body
+ * parsed as JSON (the proxy always returns one; see app/api/[...path]/route.ts).
+ * Returns the friendly message from that body, or `null` if `err` isn't one.
+ */
+export function getRateLimitMessage(err: unknown): string | null {
+  if (err instanceof ApiError && err.status === 429 && err.isJson) {
+    return err.message;
+  }
+  return null;
+}
+
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };

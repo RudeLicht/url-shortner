@@ -2,6 +2,8 @@ export type ShortenUrlRequest = {
   url: string;
   /** ISO 8601 datetime string; omit for no expiry. */
   expiry?: string;
+  /** Omit for no custom alias - see features/links/alias.ts for the validation rules. */
+  alias?: string;
 };
 
 export type ShortenUrlResponse = {
@@ -25,6 +27,21 @@ export type LinkStats = {
 };
 
 export type LinkRedirectInfo = {
+  url: string;
+  code: string;
+  expiry: string | null;
+};
+
+/**
+ * PATCH payload for updating a link. Omitting a field leaves it unchanged;
+ * `expiry: null` clears it (never expires). The code/alias is not editable.
+ */
+export type UpdateLinkRequest = {
+  url?: string;
+  expiry?: string | null;
+};
+
+export type UpdateLinkResponse = {
   url: string;
   code: string;
   expiry: string | null;

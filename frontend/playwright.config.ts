@@ -65,6 +65,13 @@ export default defineConfig({
         // (baked with the throwaway backend URL above) never overwrites a
         // developer's real `.next` build - see next.config.ts.
         NEXT_DIST_DIR: ".next-e2e",
+        // The proxy's in-memory rate limiter is keyed by IP; every e2e
+        // request comes from the same machine, so limits must be raised well
+        // above anything a spec could plausibly do, or the suite would trip
+        // it. Production leaves these unset (falling back to the real
+        // limits in lib/rate-limit.ts).
+        RATE_LIMIT_CREATE_PER_MINUTE: "1000",
+        RATE_LIMIT_MODIFY_PER_MINUTE: "1000",
       },
     },
   ],

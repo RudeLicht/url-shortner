@@ -9,9 +9,13 @@ import { ApiError } from "@/lib/api/client";
 import type { TrackedLink } from "@/features/links/types";
 
 const deleteLinkMock = vi.hoisted(() => vi.fn());
+const updateLinkMock = vi.hoisted(() => vi.fn());
+const getExistingCodeFromConflictMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/features/links/api", () => ({
   deleteLink: deleteLinkMock,
+  updateLink: updateLinkMock,
+  getExistingCodeFromConflict: getExistingCodeFromConflictMock,
 }));
 
 vi.mock("sonner", () => ({
@@ -45,6 +49,8 @@ const sharedLink: TrackedLink = {
 describe("LinksTable", () => {
   beforeEach(() => {
     deleteLinkMock.mockReset();
+    updateLinkMock.mockReset();
+    getExistingCodeFromConflictMock.mockReset();
     vi.mocked(toast.success).mockReset();
     vi.mocked(toast.error).mockReset();
     window.localStorage.clear();
@@ -181,6 +187,30 @@ describe("LinksTable", () => {
     expect(screen.getByRole("button", { name: "Delete" })).toBeInTheDocument();
   });
 
+  it("on a 429 from the proxy's rate limiter, shows the friendly message and leaves the entry untouched (not read-only, not removed)", async () => {
+    const user = userEvent.setup();
+    deleteLinkMock.mockRejectedValue(
+      new ApiError(429, "Too many requests, try again in 12 seconds.", true, {
+        message: "Too many requests, try again in 12 seconds.",
+      })
+    );
+    const onRemoved = vi.fn();
+    const onReadOnly = vi.fn();
+
+    render(
+      <LinksTable links={[activeLink]} onRemoved={onRemoved} onReadOnly={onReadOnly} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Delete link" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Too many requests, try again in 12 seconds.");
+    });
+    expect(onRemoved).not.toHaveBeenCalled();
+    expect(onReadOnly).not.toHaveBeenCalled();
+  });
+
   it("on a backend (JSON) 403, downgrades the entry to read-only instead of treating it as deleted", async () => {
     const user = userEvent.setup();
     addTrackedEntry("active1", "token-active1");
@@ -215,6 +245,7 @@ describe("LinksTable", () => {
       <LinksTable links={[activeLink]} onRemoved={onRemoved} onReadOnly={vi.fn()} />
     );
     expect(screen.getByRole("button", { name: "Delete link" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Edit link" })).toBeInTheDocument();
 
     rerender(
       <LinksTable
@@ -226,7 +257,36 @@ describe("LinksTable", () => {
 
     expect(screen.getByText("Read-only")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit link" })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Remove from list" })).toBeInTheDocument();
+  });
+
+  it("on a backend (JSON) 403 while editing, downgrades the entry to read-only and closes the dialog", async () => {
+    const user = userEvent.setup();
+    addTrackedEntry("active1", "token-active1");
+    updateLinkMock.mockRejectedValue(
+      new ApiError(403, "Forbidden", true, { message: "Forbidden" })
+    );
+    const onRemoved = vi.fn();
+    const onReadOnly = vi.fn();
+
+    render(
+      <LinksTable links={[activeLink]} onRemoved={onRemoved} onReadOnly={onReadOnly} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Edit link" }));
+    const urlInput = await screen.findByLabelText("Destination URL");
+    await user.clear(urlInput);
+    await user.type(urlInput, "https://example.com/changed");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onReadOnly).toHaveBeenCalledWith("active1");
+    });
+    expect(onRemoved).not.toHaveBeenCalled();
+    expect(getTrackedEntries()).toEqual([{ code: "active1", token: null }]);
+    // The dialog closes on a 403 rather than staying open for a retry.
+    expect(screen.queryByLabelText("Destination URL")).not.toBeInTheDocument();
   });
 
   it("shows a generic error toast (not an ownership refusal) when delete fails with a non-JSON 403, e.g. a proxy challenge page", async () => {
@@ -261,6 +321,7 @@ describe("LinksTable", () => {
 
     expect(screen.getByText("Read-only")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Delete link" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Edit link" })).not.toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Remove from list" }));
 
@@ -281,6 +342,29 @@ describe("LinksTable", () => {
 
     expect(deleteLinkMock).not.toHaveBeenCalled();
     expect(getTrackedEntries()).toEqual([]);
+  });
+
+  it("opens the QR code dialog from a row and shows a QR code and Download PNG button for that link's short URL", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <LinksTable links={[activeLink]} onRemoved={vi.fn()} onReadOnly={vi.fn()} />
+    );
+
+    await user.click(screen.getByRole("button", { name: "Show QR code" }));
+
+    const shortUrl = `${window.location.origin}/active1`;
+    expect(await screen.findByRole("img", { name: shortUrl })).toBeInTheDocument();
+    expect(screen.getByText(shortUrl, { selector: "span" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Download PNG" })).toBeInTheDocument();
+  });
+
+  it("shows the QR code action for read-only rows too", () => {
+    render(
+      <LinksTable links={[sharedLink]} onRemoved={vi.fn()} onReadOnly={vi.fn()} />
+    );
+
+    expect(screen.getByRole("button", { name: "Show QR code" })).toBeInTheDocument();
   });
 
   it("renders a mixed list with Delete link only for owned rows, and Read-only/Remove from list only for read-only rows", () => {
