@@ -26,25 +26,16 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { deleteLink } from "@/features/links/api";
+import {
+  expiryTime,
+  formatDateTime,
+  formatRelative,
+  isExpired,
+} from "@/features/links/expiry";
 import { buildShortUrl, removeTrackedCode } from "@/features/links/utils";
 import { isBackendNotFound } from "@/lib/api/client";
 import type { TrackedLink } from "@/features/links/types";
-
-function formatExpiry(expiry: string | null): string {
-  if (!expiry) return "Never";
-  const date = new Date(expiry);
-  if (Number.isNaN(date.getTime())) return "Never";
-  return date.toLocaleString(undefined, {
-    dateStyle: "medium",
-    timeStyle: "short",
-  });
-}
-
-function isExpired(expiry: string | null): boolean {
-  if (!expiry) return false;
-  const date = new Date(expiry);
-  return !Number.isNaN(date.getTime()) && date.getTime() <= Date.now();
-}
+import { useNow } from "@/hooks/use-now";
 
 type LinksTableProps = {
   links: TrackedLink[];
@@ -53,6 +44,12 @@ type LinksTableProps = {
 
 export function LinksTable({ links, onDeleted }: LinksTableProps) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  // Ticks every minute for the countdowns, and exactly when a link expires so
+  // its "Expired" badge appears without a page refresh.
+  const now = useNow(
+    60_000,
+    links.flatMap((link) => expiryTime(link.expiry) ?? [])
+  );
 
   const handleCopy = async (code: string) => {
     try {
@@ -90,7 +87,7 @@ export function LinksTable({ links, onDeleted }: LinksTableProps) {
                   /{link.code}
                   <ExternalLinkIcon className="size-3.5" />
                 </a>
-                {isExpired(link.expiry) && (
+                {isExpired(link.expiry, now) && (
                   <Badge variant="destructive">Expired</Badge>
                 )}
               </div>
@@ -100,7 +97,7 @@ export function LinksTable({ links, onDeleted }: LinksTableProps) {
             </TableCell>
             <TableCell>{link.clicks}</TableCell>
             <TableCell className="text-muted-foreground">
-              {formatExpiry(link.expiry)}
+              <ExpiryCell expiry={link.expiry} now={now} />
             </TableCell>
             <TableCell className="text-right">
               <div className="flex justify-end gap-1">
@@ -120,6 +117,21 @@ export function LinksTable({ links, onDeleted }: LinksTableProps) {
         ))}
       </TableBody>
     </Table>
+  );
+}
+
+function ExpiryCell({ expiry, now }: { expiry: string | null; now: number }) {
+  const time = expiryTime(expiry);
+  if (time === null) return "Never";
+
+  const date = formatDateTime(new Date(time));
+  if (time <= now) return date;
+
+  return (
+    <div className="flex flex-col">
+      <span>{date}</span>
+      <span className="text-xs">{formatRelative(time, now)}</span>
+    </div>
   );
 }
 

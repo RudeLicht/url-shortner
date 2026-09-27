@@ -1,7 +1,8 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { LinkIcon } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { LinkIcon, RefreshCwIcon } from "lucide-react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Loading } from "@/components/shared/loading";
@@ -12,6 +13,7 @@ import { LinksTable } from "@/features/links/components/links-table";
 import { getLinkStats } from "@/features/links/api";
 import { getTrackedCodes, removeTrackedCode } from "@/features/links/utils";
 import { isBackendNotFound } from "@/lib/api/client";
+import { cn } from "@/lib/utils";
 import type { TrackedLink } from "@/features/links/types";
 
 type FetchLinksResult = {
@@ -20,13 +22,28 @@ type FetchLinksResult = {
   hadPartialFailure: boolean;
 };
 
+/**
+ * - `initial`: first load; a failure shows the full-page error.
+ * - `retry`: the error state's Retry button; shows the loading state again.
+ * - `manual`: the Refresh button; keeps the table up and toasts on failure.
+ * - `background`: tab refocus / periodic poll; keeps the table up, fails silently.
+ */
+type LoadMode = "initial" | "retry" | "manual" | "background";
+
+// With the DB on the same VPS each poll is cheap; this mostly keeps click
+// counts fresh while the tab is open.
+const AUTO_REFRESH_MS = 30_000;
+
 export default function HomePage() {
   const [links, setLinks] = useState<TrackedLink[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">(
     "loading"
   );
   const [hasPartialFailure, setHasPartialFailure] = useState(false);
-  const [reloadToken, setReloadToken] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  // Only the most recently started load may update state, so a slow earlier
+  // response can't overwrite a newer one.
+  const latestRequestRef = useRef(0);
 
   // Pure data fetch - intentionally contains no setState calls itself, so
   // that the effect below can call it directly and only update state from
@@ -70,32 +87,62 @@ export default function HomePage() {
     return { links, hadPartialFailure };
   }, []);
 
-  useEffect(() => {
-    let ignore = false;
+  // Only sets state from within the promise callbacks, so it's safe to call
+  // straight from an effect.
+  const trackLoad = useCallback(
+    (mode: LoadMode) => {
+      const requestId = ++latestRequestRef.current;
+      const isLatest = () => requestId === latestRequestRef.current;
 
-    fetchLinksData()
-      .then(({ links, hadPartialFailure }) => {
-        if (!ignore) {
+      fetchLinksData()
+        .then(({ links, hadPartialFailure }) => {
+          if (!isLatest()) return;
           setLinks(links);
           setHasPartialFailure(hadPartialFailure);
           setStatus("ready");
-        }
-      })
-      .catch(() => {
-        if (!ignore) {
-          setStatus("error");
-        }
-      });
+        })
+        .catch(() => {
+          if (!isLatest()) return;
+          if (mode === "initial" || mode === "retry") {
+            setStatus("error");
+          } else if (mode === "manual") {
+            toast.error("Couldn't refresh your links");
+          }
+        })
+        .finally(() => {
+          if (isLatest()) setIsRefreshing(false);
+        });
+    },
+    [fetchLinksData]
+  );
 
-    return () => {
-      ignore = true;
+  useEffect(() => {
+    trackLoad("initial");
+  }, [trackLoad]);
+
+  const refreshLinks = useCallback(
+    (mode: Exclude<LoadMode, "initial">) => {
+      if (mode === "retry") setStatus("loading");
+      if (mode === "manual") setIsRefreshing(true);
+      trackLoad(mode);
+    },
+    [trackLoad]
+  );
+
+  // Quietly refetch when the user comes back to the tab, and periodically
+  // while it's visible, so click counts and expiries stay current.
+  useEffect(() => {
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") refreshLinks("background");
     };
-  }, [fetchLinksData, reloadToken]);
 
-  const refreshLinks = useCallback(() => {
-    setStatus("loading");
-    setReloadToken((token) => token + 1);
-  }, []);
+    const id = window.setInterval(refreshIfVisible, AUTO_REFRESH_MS);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
+  }, [refreshLinks]);
 
   const handleDeleted = (code: string) => {
     setLinks((current) => current.filter((link) => link.code !== code));
@@ -116,12 +163,25 @@ export default function HomePage() {
         </p>
 
         <div className="w-full max-w-xl">
-          <ShortenForm onCreated={refreshLinks} />
+          <ShortenForm onCreated={() => refreshLinks("manual")} />
         </div>
       </section>
 
       <section className="flex flex-col gap-4">
-        <h2 className="font-heading text-lg font-medium">Your links</h2>
+        <div className="flex items-center justify-between gap-4">
+          <h2 className="font-heading text-lg font-medium">Your links</h2>
+          {status === "ready" && links.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              disabled={isRefreshing}
+              onClick={() => refreshLinks("manual")}
+            >
+              <RefreshCwIcon className={cn(isRefreshing && "animate-spin")} />
+              {isRefreshing ? "Refreshing..." : "Refresh"}
+            </Button>
+          )}
+        </div>
 
         {status === "loading" && <Loading label="Loading your links..." />}
 
@@ -130,7 +190,7 @@ export default function HomePage() {
             title="Couldn't load your links"
             description="Something went wrong while fetching your links. Please try again."
             action={
-              <Button variant="outline" onClick={refreshLinks}>
+              <Button variant="outline" onClick={() => refreshLinks("retry")}>
                 Retry
               </Button>
             }
