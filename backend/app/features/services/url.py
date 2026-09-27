@@ -1,4 +1,7 @@
 import base62
+import hashlib
+import hmac
+import secrets
 from datetime import datetime, timezone
 
 from sqlalchemy import select
@@ -9,6 +12,10 @@ from fastapi import status
 from fastapi.responses import JSONResponse, Response
 
 from app.features.models.url import Url, UrlStats
+
+
+def _hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
 
 
 def is_expired(expiry: datetime | None) -> bool:
@@ -50,7 +57,14 @@ def shorten_url(url: str, expiry: datetime | None, session: Session):
             session.delete(existing_url)
             session.flush()
 
-        url_model = Url(url=url, code="", expiry=expiry)
+        token = secrets.token_urlsafe(32)
+
+        url_model = Url(
+            url=url,
+            code="",
+            expiry=expiry,
+            owner_token_hash=_hash_token(token),
+        )
 
         session.add(url_model)
 
@@ -67,6 +81,7 @@ def shorten_url(url: str, expiry: datetime | None, session: Session):
                 "url": url_model.url,
                 "short_url": url_model.code,
                 "expiry": url_model.expiry.isoformat() if url_model.expiry else None,
+                "delete_token": token,
             },
         )
 
@@ -150,7 +165,7 @@ def get_url_information(url_code: str, session: Session):
         )
 
 
-def delete_url_function(url_code: str, session: Session):
+def delete_url_function(url_code: str, delete_token: str | None, session: Session):
     try:
         url_model = session.execute(
             select(Url).where(Url.code == url_code)
@@ -160,6 +175,21 @@ def delete_url_function(url_code: str, session: Session):
             return JSONResponse(
                 status_code=status.HTTP_404_NOT_FOUND,
                 content={"message": "URL not found"},
+            )
+
+        # Same 403 body/status whether the token is missing, the row has no
+        # owner_token_hash (pre-existing row), or the token doesn't match --
+        # never leak which case it was.
+        if (
+            not delete_token
+            or url_model.owner_token_hash is None
+            or not hmac.compare_digest(
+                _hash_token(delete_token), url_model.owner_token_hash
+            )
+        ):
+            return JSONResponse(
+                status_code=status.HTTP_403_FORBIDDEN,
+                content={"message": "You are not allowed to delete this URL"},
             )
 
         session.delete(url_model)

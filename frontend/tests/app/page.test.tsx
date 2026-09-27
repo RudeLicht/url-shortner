@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import HomePage from "@/app/page";
 import { ApiError } from "@/lib/api/client";
-import { addTrackedCode, getTrackedCodes } from "@/features/links/utils";
+import { addTrackedEntry, getTrackedEntries } from "@/features/links/utils";
 
 const getLinkStatsMock = vi.hoisted(() => vi.fn());
 const deleteLinkMock = vi.hoisted(() => vi.fn());
@@ -41,7 +41,7 @@ describe("HomePage", () => {
   });
 
   it("renders the links table once tracked codes resolve", async () => {
-    addTrackedCode("abc123");
+    addTrackedEntry("abc123", null);
     getLinkStatsMock.mockResolvedValue({
       url: "https://example.com",
       clicks: 5,
@@ -56,7 +56,7 @@ describe("HomePage", () => {
   });
 
   it("shows a full-page error with a retry button when every fetch fails (non-404)", async () => {
-    addTrackedCode("abc123");
+    addTrackedEntry("abc123", null);
     getLinkStatsMock.mockRejectedValue(new ApiError(500, "boom", true, {}));
 
     render(<HomePage />);
@@ -75,8 +75,8 @@ describe("HomePage", () => {
   });
 
   it("shows a partial-failure notice when some (but not all) links fail to load", async () => {
-    addTrackedCode("abc123");
-    addTrackedCode("def456");
+    addTrackedEntry("abc123", null);
+    addTrackedEntry("def456", null);
     getLinkStatsMock.mockImplementation(async (code: string) => {
       if (code === "abc123") {
         return { url: "https://example.com", clicks: 1, expiry: null };
@@ -95,7 +95,7 @@ describe("HomePage", () => {
   });
 
   it("silently removes stale codes that 404 from tracked storage", async () => {
-    addTrackedCode("gone123");
+    addTrackedEntry("gone123", null);
     getLinkStatsMock.mockRejectedValue(
       new ApiError(404, "URL not found", true, { message: "URL not found" })
     );
@@ -103,7 +103,7 @@ describe("HomePage", () => {
     render(<HomePage />);
 
     expect(await screen.findByText("No links yet")).toBeInTheDocument();
-    expect(getTrackedCodes()).toEqual([]);
+    expect(getTrackedEntries()).toEqual([]);
   });
 
   it("refreshes the list after successfully shortening a new URL", async () => {
@@ -116,6 +116,7 @@ describe("HomePage", () => {
       url: "https://example.com",
       short_url: "newcode1",
       expiry: null,
+      delete_token: "token-newcode1",
     });
 
     const user = userEvent.setup();
@@ -133,7 +134,7 @@ describe("HomePage", () => {
   });
 
   it("refreshes the stats in place when Refresh is clicked", async () => {
-    addTrackedCode("abc123");
+    addTrackedEntry("abc123", null);
     getLinkStatsMock.mockResolvedValue({
       url: "https://example.com",
       clicks: 5,
@@ -156,7 +157,7 @@ describe("HomePage", () => {
   });
 
   it("keeps the table and shows a toast when a manual refresh fails", async () => {
-    addTrackedCode("abc123");
+    addTrackedEntry("abc123", null);
     getLinkStatsMock.mockResolvedValue({
       url: "https://example.com",
       clicks: 5,
@@ -177,8 +178,145 @@ describe("HomePage", () => {
     expect(screen.queryByText("Couldn't load your links")).not.toBeInTheDocument();
   });
 
+  it("does not restore a token that was downgraded to read-only while a refresh was in flight", async () => {
+    addTrackedEntry("abc123", "token-abc123");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    const user = userEvent.setup();
+    render(<HomePage />);
+    expect(
+      await screen.findByRole("button", { name: "Delete link" })
+    ).toBeInTheDocument();
+
+    let resolveStats: (value: {
+      url: string;
+      clicks: number;
+      expiry: string | null;
+    }) => void = () => {};
+    const deferredStats = new Promise<{
+      url: string;
+      clicks: number;
+      expiry: string | null;
+    }>((resolve) => {
+      resolveStats = resolve;
+    });
+    getLinkStatsMock.mockReturnValue(deferredStats);
+
+    // Kick off a refresh, but its stats request stays pending below.
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    // While that refresh is still in flight, the backend rejects this
+    // browser's delete token, downgrading the entry to read-only.
+    deleteLinkMock.mockRejectedValue(
+      new ApiError(403, "Forbidden", true, { message: "Forbidden" })
+    );
+    await user.click(screen.getByRole("button", { name: "Delete link" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    expect(await screen.findByText("Read-only")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete link" })
+    ).not.toBeInTheDocument();
+
+    // Now let the stale refresh finish - it must not resurrect the token.
+    resolveStats({ url: "https://example.com", clicks: 9, expiry: null });
+
+    await waitFor(() => {
+      expect(screen.getByText("9")).toBeInTheDocument();
+    });
+    expect(screen.getByText("Read-only")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Delete link" })
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not resurrect a link that was removed while a refresh was in flight", async () => {
+    addTrackedEntry("abc123", "token-abc123");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    const user = userEvent.setup();
+    render(<HomePage />);
+    expect(await screen.findByText("/abc123")).toBeInTheDocument();
+
+    let resolveStats: (value: {
+      url: string;
+      clicks: number;
+      expiry: string | null;
+    }) => void = () => {};
+    const deferredStats = new Promise<{
+      url: string;
+      clicks: number;
+      expiry: string | null;
+    }>((resolve) => {
+      resolveStats = resolve;
+    });
+    getLinkStatsMock.mockReturnValue(deferredStats);
+
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    deleteLinkMock.mockResolvedValue(undefined);
+    await user.click(screen.getByRole("button", { name: "Delete link" }));
+    await user.click(await screen.findByRole("button", { name: "Delete" }));
+
+    expect(await screen.findByText("No links yet")).toBeInTheDocument();
+
+    resolveStats({ url: "https://example.com", clicks: 9, expiry: null });
+
+    await waitFor(() => {
+      expect(getLinkStatsMock).toHaveBeenCalledTimes(2);
+    });
+    expect(screen.getByText("No links yet")).toBeInTheDocument();
+    expect(screen.queryByText("/abc123")).not.toBeInTheDocument();
+  });
+
+  it("does not remove a link that was re-tracked with a fresh token while its stats request was in flight and then 404'd", async () => {
+    addTrackedEntry("abc123", "token-old");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    const user = userEvent.setup();
+    render(<HomePage />);
+    expect(await screen.findByText("/abc123")).toBeInTheDocument();
+
+    let rejectStats: (reason: unknown) => void = () => {};
+    const deferredStats = new Promise((_, reject) => {
+      rejectStats = reject;
+    });
+    getLinkStatsMock.mockReturnValue(deferredStats);
+
+    // Kick off a refresh; its stats request for "abc123" stays pending.
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    // While that request is in flight, the code gets reused (e.g. deleted
+    // and re-shortened) and re-tracked with a fresh token.
+    addTrackedEntry("abc123", "token-fresh");
+
+    // Now the stale in-flight request settles as a 404.
+    rejectStats(new ApiError(404, "URL not found", true, { message: "URL not found" }));
+
+    // Wait for the refresh triggered above to finish processing.
+    await waitFor(() => {
+      expect(screen.queryByText("Refreshing...")).not.toBeInTheDocument();
+    });
+
+    // The fresh entry (and its delete token) must survive the stale 404,
+    // not be wiped out by it.
+    expect(getTrackedEntries()).toEqual([{ code: "abc123", token: "token-fresh" }]);
+  });
+
   it("refetches quietly when the tab becomes visible again", async () => {
-    addTrackedCode("abc123");
+    addTrackedEntry("abc123", null);
     getLinkStatsMock.mockResolvedValue({
       url: "https://example.com",
       clicks: 5,

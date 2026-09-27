@@ -1,3 +1,4 @@
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 
@@ -72,6 +73,20 @@ def test_shorten_url_response_body_shape(db_session):
     assert payload["url"] == "https://example.com"
     assert payload["short_url"] == base62.encode(1)
     assert payload["expiry"] is None
+    assert isinstance(payload["delete_token"], str)
+    assert payload["delete_token"] != ""
+
+
+def test_shorten_url_owner_token_hash_is_sha256_of_returned_token(db_session):
+    response = shorten_url("https://example.com", None, db_session)
+    token = json.loads(response.body)["delete_token"]
+
+    url_model = db_session.execute(select(Url)).scalar_one()
+
+    assert url_model.owner_token_hash is not None
+    assert len(url_model.owner_token_hash) == 64
+    assert url_model.owner_token_hash != token
+    assert url_model.owner_token_hash == hashlib.sha256(token.encode()).hexdigest()
 
 
 def test_shorten_url_multiple_urls_yield_distinct_codes(db_session):
@@ -87,6 +102,27 @@ def test_shorten_url_multiple_urls_yield_distinct_codes(db_session):
     assert codes == {base62.encode(row.id) for row in rows}
 
 
+def test_shorten_url_distinct_links_get_distinct_delete_tokens(db_session):
+    r1 = shorten_url("https://example.com/one", None, db_session)
+    r2 = shorten_url("https://example.com/two", None, db_session)
+
+    token_1 = json.loads(r1.body)["delete_token"]
+    token_2 = json.loads(r2.body)["delete_token"]
+
+    assert token_1 != token_2
+
+    code_2 = json.loads(r2.body)["short_url"]
+
+    # link 1's token must not be able to delete link 2.
+    cross_delete = delete_url_function(code_2, token_1, db_session)
+    assert cross_delete.status_code == status.HTTP_403_FORBIDDEN
+
+    assert (
+        db_session.execute(select(Url).where(Url.code == code_2)).scalar_one_or_none()
+        is not None
+    )
+
+
 def test_shorten_url_duplicate_url_returns_409(db_session):
     first = shorten_url("https://example.com", None, db_session)
     original_code = json.loads(first.body)["short_url"]
@@ -96,6 +132,7 @@ def test_shorten_url_duplicate_url_returns_409(db_session):
     assert response.status_code == status.HTTP_409_CONFLICT
     payload = json.loads(response.body)
     assert payload == {"message": "URL already shortened", "code": original_code}
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
 
     rows = db_session.execute(select(Url)).scalars().all()
     assert len(rows) == 1
@@ -174,6 +211,45 @@ def test_shorten_url_duplicate_of_expired_url_replaces_row_with_new_code(db_sess
     assert abs((actual_expiry - new_expiry).total_seconds()) < 1
 
 
+def test_shorten_url_duplicate_of_expired_url_gets_a_fresh_delete_token(db_session):
+    # The replacement row created when a duplicate expired URL is
+    # re-shortened must get its own delete_token: the old row's token must
+    # stop working (there is no row left for it to match), and only the new
+    # token should be able to delete the new code.
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    create_response = shorten_url("https://example.com", future, db_session)
+    old_code = json.loads(create_response.body)["short_url"]
+    old_token = json.loads(create_response.body)["delete_token"]
+
+    old_url_model = db_session.execute(select(Url)).scalar_one()
+    old_url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    response = shorten_url("https://example.com", None, db_session)
+    assert response.status_code == status.HTTP_201_CREATED
+    payload = json.loads(response.body)
+    new_code = payload["short_url"]
+    new_token = payload["delete_token"]
+
+    assert new_token != old_token
+
+    # The old token can no longer delete anything: the old row is gone, and
+    # it must not incorrectly delete the new row at the same code either.
+    old_token_attempt = delete_url_function(new_code, old_token, db_session)
+    assert old_token_attempt.status_code == status.HTTP_403_FORBIDDEN
+    assert (
+        db_session.execute(select(Url).where(Url.code == new_code)).scalar_one_or_none()
+        is not None
+    )
+
+    new_token_attempt = delete_url_function(new_code, new_token, db_session)
+    assert new_token_attempt.status_code == status.HTTP_204_NO_CONTENT
+    assert (
+        db_session.execute(select(Url).where(Url.code == new_code)).scalar_one_or_none()
+        is None
+    )
+
+
 def test_shorten_url_duplicate_url_with_future_expiry_returns_409(db_session):
     # The boundary of the new "expired duplicate" branch: a live row with a
     # *future* expiry must still 409 with its existing code, same as a row
@@ -187,6 +263,7 @@ def test_shorten_url_duplicate_url_with_future_expiry_returns_409(db_session):
     assert response.status_code == status.HTTP_409_CONFLICT
     payload = json.loads(response.body)
     assert payload == {"message": "URL already shortened", "code": original_code}
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
 
     rows = db_session.execute(select(Url)).scalars().all()
     assert len(rows) == 1
@@ -230,6 +307,7 @@ def test_shorten_url_integrity_error_race_falls_back_to_existing_row(
     assert response.status_code == status.HTTP_409_CONFLICT
     payload = json.loads(response.body)
     assert payload == {"message": "URL already shortened", "code": "existing123"}
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
 
 
 def test_shorten_url_integrity_error_race_with_expired_row_returns_500(
@@ -439,16 +517,37 @@ def test_get_url_stats_unknown_code_returns_404(db_session):
     assert response.status_code == status.HTTP_404_NOT_FOUND
 
 
+def test_get_url_stats_response_excludes_delete_token_and_hash(db_session):
+    shorten_url("https://example.com", None, db_session)
+    url_model = db_session.execute(select(Url)).scalar_one()
+
+    response = get_url_stats_function(url_model.code, db_session)
+    payload = json.loads(response.body)
+
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
+
+
+def test_get_url_information_response_excludes_delete_token_and_hash(db_session):
+    shorten_url("https://example.com", None, db_session)
+    url_model = db_session.execute(select(Url)).scalar_one()
+
+    response = get_url_information(url_model.code, db_session)
+    payload = json.loads(response.body)
+
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
+
+
 # --- delete_url_function -----------------------------------------------
 
 
 def test_delete_url_removes_row_and_cascades_stats(db_session):
-    shorten_url("https://example.com", None, db_session)
+    create_response = shorten_url("https://example.com", None, db_session)
+    token = json.loads(create_response.body)["delete_token"]
     url_model = db_session.execute(select(Url)).scalar_one()
     code = url_model.code
     url_id = url_model.id
 
-    response = delete_url_function(code, db_session)
+    response = delete_url_function(code, token, db_session)
     assert response.status_code == status.HTTP_204_NO_CONTENT
 
     assert db_session.execute(select(Url).where(Url.id == url_id)).scalar_one_or_none() is None
@@ -459,5 +558,90 @@ def test_delete_url_removes_row_and_cascades_stats(db_session):
 
 
 def test_delete_url_unknown_code_returns_404(db_session):
-    response = delete_url_function("doesnotexist", db_session)
+    response = delete_url_function("doesnotexist", "some-token", db_session)
     assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+def test_delete_url_missing_token_returns_403(db_session):
+    create_response = shorten_url("https://example.com", None, db_session)
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    response = delete_url_function(code, None, db_session)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to delete this URL"}
+
+    assert db_session.execute(select(Url).where(Url.code == code)).scalar_one_or_none() is not None
+
+
+def test_delete_url_wrong_token_returns_403(db_session):
+    shorten_url("https://example.com", None, db_session)
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    response = delete_url_function(code, "wrong-token", db_session)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to delete this URL"}
+
+    assert db_session.execute(select(Url).where(Url.code == code)).scalar_one_or_none() is not None
+
+
+def test_delete_url_empty_token_returns_403(db_session):
+    create_response = shorten_url("https://example.com", None, db_session)
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+    # Sanity: an empty string is falsy and must be treated the same as a
+    # missing token, not compared against the real hash.
+    assert json.loads(create_response.body)["delete_token"] != ""
+
+    response = delete_url_function(code, "", db_session)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to delete this URL"}
+
+    assert db_session.execute(select(Url).where(Url.code == code)).scalar_one_or_none() is not None
+
+
+def test_delete_url_row_without_owner_token_hash_returns_403(db_session):
+    # Pre-existing rows created before this feature have owner_token_hash =
+    # NULL; they must never be deletable via any token.
+    existing = Url(url="https://example.com", code="legacycode", expiry=None)
+    existing.stats = UrlStats()
+    db_session.add(existing)
+    db_session.commit()
+
+    response = delete_url_function("legacycode", "any-token", db_session)
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to delete this URL"}
+
+    assert (
+        db_session.execute(select(Url).where(Url.code == "legacycode")).scalar_one_or_none()
+        is not None
+    )
+
+
+def test_delete_url_403_bodies_are_identical_regardless_of_cause(db_session):
+    # Missing token, wrong token, and a legacy NULL-hash row must all produce
+    # the exact same 403 body -- no oracle that would let a caller tell them
+    # apart.
+    create_response = shorten_url("https://example.com", None, db_session)
+    code = json.loads(create_response.body)["short_url"]
+
+    legacy = Url(url="https://legacy.example.com", code="legacycode", expiry=None)
+    legacy.stats = UrlStats()
+    db_session.add(legacy)
+    db_session.commit()
+
+    missing = delete_url_function(code, None, db_session)
+    wrong = delete_url_function(code, "wrong-token", db_session)
+    legacy_response = delete_url_function("legacycode", "any-token", db_session)
+
+    bodies = [json.loads(r.body) for r in (missing, wrong, legacy_response)]
+    statuses = [r.status_code for r in (missing, wrong, legacy_response)]
+
+    assert statuses == [status.HTTP_403_FORBIDDEN] * 3
+    assert bodies[0] == bodies[1] == bodies[2]
+    assert bodies[0] == {"message": "You are not allowed to delete this URL"}

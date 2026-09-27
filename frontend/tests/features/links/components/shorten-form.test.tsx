@@ -5,7 +5,7 @@ import { toast } from "sonner";
 
 import { ShortenForm } from "@/features/links/components/shorten-form";
 import { ApiError } from "@/lib/api/client";
-import { getTrackedCodes } from "@/features/links/utils";
+import { addTrackedEntry, getTrackedEntries } from "@/features/links/utils";
 
 const shortenUrlMock = vi.hoisted(() => vi.fn());
 const getExistingCodeFromConflictMock = vi.hoisted(() => vi.fn());
@@ -33,6 +33,7 @@ describe("ShortenForm", () => {
       url: "https://example.com",
       short_url: "abc123",
       expiry: null,
+      delete_token: "token-abc123",
     });
     const onCreated = vi.fn();
 
@@ -49,8 +50,50 @@ describe("ShortenForm", () => {
       url: "https://example.com",
       expiry: undefined,
     });
-    expect(getTrackedCodes()).toEqual(["abc123"]);
+    expect(getTrackedEntries()).toEqual([{ code: "abc123", token: "token-abc123" }]);
     expect(onCreated).toHaveBeenCalledTimes(1);
+  });
+
+  it("stores a null token when the backend response omits delete_token (an older, pre-token backend)", async () => {
+    const user = userEvent.setup();
+    shortenUrlMock.mockResolvedValue({
+      url: "https://example.com",
+      short_url: "abc123",
+      expiry: null,
+      // delete_token intentionally omitted, as an older backend would.
+    });
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(`${window.location.origin}/abc123`)).toBeInTheDocument();
+    });
+
+    expect(getTrackedEntries()).toEqual([{ code: "abc123", token: null }]);
+  });
+
+  it("stores a null token when the backend response has an empty-string delete_token", async () => {
+    const user = userEvent.setup();
+    shortenUrlMock.mockResolvedValue({
+      url: "https://example.com",
+      short_url: "abc123",
+      expiry: null,
+      delete_token: "",
+    });
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(`${window.location.origin}/abc123`)).toBeInTheDocument();
+    });
+
+    expect(getTrackedEntries()).toEqual([{ code: "abc123", token: null }]);
   });
 
   it("shows a client-side validation error for a non-http(s) URL without calling the API", async () => {
@@ -81,6 +124,7 @@ describe("ShortenForm", () => {
       url: "https://example.com",
       short_url: "abc123",
       expiry: null,
+      delete_token: "token-abc123",
     });
 
     render(<ShortenForm onCreated={vi.fn()} />);
@@ -106,6 +150,7 @@ describe("ShortenForm", () => {
       url: "https://example.com",
       short_url: "abc123",
       expiry: null,
+      delete_token: "token-abc123",
     });
 
     render(<ShortenForm onCreated={vi.fn()} />);
@@ -159,6 +204,7 @@ describe("ShortenForm", () => {
       url: "https://example.com",
       short_url: "abc123",
       expiry: null,
+      delete_token: "token-abc123",
     });
 
     render(<ShortenForm onCreated={vi.fn()} />);
@@ -190,7 +236,7 @@ describe("ShortenForm", () => {
     expect(shortenUrlMock.mock.calls[0][0].expiry).toBe(expected.toISOString());
   });
 
-  it("on a 409 conflict with an existing code, reuses and tracks that code instead of erroring", async () => {
+  it("on a 409 conflict for a code this browser doesn't already own, tracks it read-only", async () => {
     const user = userEvent.setup();
     const conflictError = new ApiError(409, "URL already shortened", true, {
       message: "URL already shortened",
@@ -209,7 +255,65 @@ describe("ShortenForm", () => {
       expect(screen.getByText(`${window.location.origin}/existing1`)).toBeInTheDocument();
     });
 
-    expect(getTrackedCodes()).toEqual(["existing1"]);
+    expect(getTrackedEntries()).toEqual([{ code: "existing1", token: null }]);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledWith(
+      "This URL was already shortened by someone else",
+      expect.objectContaining({ description: expect.any(String) })
+    );
+  });
+
+  it("on a 409 conflict for a code this browser already owns, keeps the existing-link message and the token", async () => {
+    const user = userEvent.setup();
+    addTrackedEntry("existing1", "token-existing1");
+    const conflictError = new ApiError(409, "URL already shortened", true, {
+      message: "URL already shortened",
+      code: "existing1",
+    });
+    shortenUrlMock.mockRejectedValue(conflictError);
+    getExistingCodeFromConflictMock.mockReturnValue("existing1");
+    const onCreated = vi.fn();
+
+    render(<ShortenForm onCreated={onCreated} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(`${window.location.origin}/existing1`)).toBeInTheDocument();
+    });
+
+    expect(getTrackedEntries()).toEqual([{ code: "existing1", token: "token-existing1" }]);
+    expect(onCreated).toHaveBeenCalledTimes(1);
+    expect(toast.info).toHaveBeenCalledWith(
+      "This URL already has a short link",
+      expect.objectContaining({ description: undefined })
+    );
+  });
+
+  it("on a 409 conflict for a code already in the list read-only (legacy entry), keeps the existing-link message rather than 'shortened by someone else'", async () => {
+    const user = userEvent.setup();
+    // A legacy/read-only entry this browser already knows about, but with
+    // no token - it must not be told this is new to it.
+    addTrackedEntry("existing1", null);
+    const conflictError = new ApiError(409, "URL already shortened", true, {
+      message: "URL already shortened",
+      code: "existing1",
+    });
+    shortenUrlMock.mockRejectedValue(conflictError);
+    getExistingCodeFromConflictMock.mockReturnValue("existing1");
+    const onCreated = vi.fn();
+
+    render(<ShortenForm onCreated={onCreated} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(`${window.location.origin}/existing1`)).toBeInTheDocument();
+    });
+
+    expect(getTrackedEntries()).toEqual([{ code: "existing1", token: null }]);
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(toast.info).toHaveBeenCalledWith(
       "This URL already has a short link",
@@ -231,7 +335,7 @@ describe("ShortenForm", () => {
     expect(
       await screen.findByText("This URL has already been shortened")
     ).toBeInTheDocument();
-    expect(getTrackedCodes()).toEqual([]);
+    expect(getTrackedEntries()).toEqual([]);
   });
 
   it("shows a generic form error when the server returns an unexpected error", async () => {

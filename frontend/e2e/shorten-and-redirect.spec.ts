@@ -84,4 +84,74 @@ test.describe("shorten, list, and redirect", () => {
 
     await expect(page.getByText("Link not found")).toBeVisible();
   });
+
+  test("the creator can delete their own link", async ({ page }) => {
+    await page.goto("/");
+
+    await page.getByPlaceholder("Paste a long URL...").fill(targetUrl);
+    await page.getByRole("button", { name: "Shorten" }).click();
+
+    const escaped = targetUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const row = page.getByRole("row", { name: new RegExp(escaped) });
+    await expect(row).toBeVisible();
+    await expect(row.getByRole("button", { name: "Delete link" })).toBeVisible();
+
+    await row.getByRole("button", { name: "Delete link" }).click();
+    await page.getByRole("button", { name: "Delete" }).click();
+
+    await expect(page.getByText("Link deleted")).toBeVisible();
+    await expect(row).not.toBeVisible();
+  });
+
+  test("a link shortened by another browser shows up read-only, while the creator can still delete it", async ({
+    browser,
+  }) => {
+    const contextA = await browser.newContext();
+    const contextB = await browser.newContext();
+    try {
+      const pageA = await contextA.newPage();
+      const pageB = await contextB.newPage();
+
+      // Browser A shortens the URL first.
+      await pageA.goto("/");
+      await pageA.getByPlaceholder("Paste a long URL...").fill(targetUrl);
+      await pageA.getByRole("button", { name: "Shorten" }).click();
+
+      const resultLocatorA = pageA.getByText(/^http:\/\/127\.0\.0\.1:3100\/\w+$/);
+      await expect(resultLocatorA).toBeVisible();
+
+      // Browser B shortens the exact same URL, landing on the 409 conflict
+      // path - it's new to B, so B should be told it belongs to someone else.
+      await pageB.goto("/");
+      await pageB.getByPlaceholder("Paste a long URL...").fill(targetUrl);
+      await pageB.getByRole("button", { name: "Shorten" }).click();
+
+      await expect(
+        pageB.getByText("This URL was already shortened by someone else")
+      ).toBeVisible();
+
+      const escaped = targetUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const rowB = pageB.getByRole("row", { name: new RegExp(escaped) });
+      await expect(rowB).toBeVisible();
+      await expect(rowB.getByText("Read-only")).toBeVisible();
+      await expect(rowB.getByRole("button", { name: "Delete link" })).toHaveCount(0);
+      await expect(rowB.getByRole("button", { name: "Remove from list" })).toBeVisible();
+
+      // Removing it from B's list is local-only - it doesn't delete the link.
+      await rowB.getByRole("button", { name: "Remove from list" }).click();
+      await expect(pageB.getByText("Removed from your list")).toBeVisible();
+      await expect(rowB).not.toBeVisible();
+
+      // Meanwhile A, the creator, can still delete the link it owns.
+      const rowA = pageA.getByRole("row", { name: new RegExp(escaped) });
+      await expect(rowA).toBeVisible();
+      await rowA.getByRole("button", { name: "Delete link" }).click();
+      await pageA.getByRole("button", { name: "Delete" }).click();
+      await expect(pageA.getByText("Link deleted")).toBeVisible();
+      await expect(rowA).not.toBeVisible();
+    } finally {
+      await contextA.close();
+      await contextB.close();
+    }
+  });
 });

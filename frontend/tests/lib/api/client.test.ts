@@ -1,5 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { apiFetch, ApiError, isBackendNotFound } from "@/lib/api/client";
+import {
+  apiFetch,
+  ApiError,
+  isBackendForbidden,
+  isBackendNotFound,
+} from "@/lib/api/client";
 
 type MockResponseInit = {
   status: number;
@@ -175,5 +180,26 @@ describe("isBackendNotFound", () => {
 
   it("is false for a non-ApiError value", () => {
     expect(isBackendNotFound(new Error("network down"))).toBe(false);
+  });
+});
+
+describe("isBackendForbidden", () => {
+  it("is true for a backend JSON 403", () => {
+    const error = new ApiError(403, "Forbidden", true, { message: "Forbidden" });
+    expect(isBackendForbidden(error)).toBe(true);
+  });
+
+  it("is false for a non-JSON 403 (e.g. a Cloudflare challenge page)", () => {
+    const error = new ApiError(403, "Just a moment...", false, undefined);
+    expect(isBackendForbidden(error)).toBe(false);
+  });
+
+  it("is false for a JSON error that isn't a 403", () => {
+    const error = new ApiError(404, "URL not found", true, { message: "URL not found" });
+    expect(isBackendForbidden(error)).toBe(false);
+  });
+
+  it("is false for a non-ApiError value", () => {
+    expect(isBackendForbidden(new Error("network down"))).toBe(false);
   });
 });

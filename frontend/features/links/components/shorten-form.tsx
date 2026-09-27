@@ -12,7 +12,7 @@ import { Input } from "@/components/ui/input";
 import { getExistingCodeFromConflict, shortenUrl } from "@/features/links/api";
 import { ExpiryPicker } from "@/features/links/components/expiry-picker";
 import { combineDateAndTime, resolveExpiry } from "@/features/links/expiry";
-import { addTrackedCode, buildShortUrl } from "@/features/links/utils";
+import { addTrackedEntry, buildShortUrl } from "@/features/links/utils";
 import { ApiError } from "@/lib/api/client";
 
 const formSchema = z
@@ -94,7 +94,15 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
         expiry: expiry?.toISOString(),
       });
 
-      addTrackedCode(response.short_url);
+      // The frontend and backend deploy independently, so an older backend
+      // that predates delete tokens could omit the field entirely - guard
+      // at runtime rather than trusting the response type.
+      const token =
+        typeof response.delete_token === "string" &&
+        response.delete_token.length > 0
+          ? response.delete_token
+          : null;
+      addTrackedEntry(response.short_url, token);
       setResult(response.short_url);
       setCopied(false);
       reset(DEFAULT_VALUES);
@@ -104,16 +112,31 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
         if (error.status === 409) {
           const existingCode = getExistingCodeFromConflict(error);
           if (existingCode) {
-            addTrackedCode(existingCode);
+            // A null token here never downgrades a token this browser
+            // already owns; the returned value is whatever was stored for
+            // this code *before* this call, so it tells apart "already in
+            // your list" (owned or not) from "brand new to this browser"
+            // without a second read of storage.
+            const previousEntry = addTrackedEntry(existingCode, null);
             reset(DEFAULT_VALUES);
             setResult(existingCode);
             setCopied(false);
             onCreated();
-            toast.info("This URL already has a short link", {
-              description: expiry
-                ? "The expiry you set wasn't applied - the existing link's expiry was kept."
-                : undefined,
-            });
+            if (previousEntry) {
+              toast.info("This URL already has a short link", {
+                description: expiry
+                  ? "The expiry you set wasn't applied - the existing link's expiry was kept."
+                  : undefined,
+              });
+            } else {
+              toast.info("This URL was already shortened by someone else", {
+                description:
+                  "It's been added to your list as read-only - you won't be able to delete it." +
+                  (expiry
+                    ? " The expiry you set wasn't applied - the existing link's expiry was kept."
+                    : ""),
+              });
+            }
             return;
           }
           setError("url", {

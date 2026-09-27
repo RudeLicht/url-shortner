@@ -11,10 +11,13 @@ import { ErrorState } from "@/components/shared/error-state";
 import { ShortenForm } from "@/features/links/components/shorten-form";
 import { LinksTable } from "@/features/links/components/links-table";
 import { getLinkStats } from "@/features/links/api";
-import { getTrackedCodes, removeTrackedCode } from "@/features/links/utils";
+import {
+  getTrackedEntries,
+  removeTrackedEntryIfUnchanged,
+} from "@/features/links/utils";
 import { isBackendNotFound } from "@/lib/api/client";
 import { cn } from "@/lib/utils";
-import type { TrackedLink } from "@/features/links/types";
+import type { LinkStats, TrackedLink } from "@/features/links/types";
 
 type FetchLinksResult = {
   links: TrackedLink[];
@@ -50,37 +53,59 @@ export default function HomePage() {
   // within the .then()/.catch() callbacks (the pattern React's own docs use
   // for data fetching in effects).
   const fetchLinksData = useCallback(async (): Promise<FetchLinksResult> => {
-    const codes = getTrackedCodes();
+    const entries = getTrackedEntries();
 
     const settled = await Promise.allSettled(
-      codes.map(async (code) => {
-        const stats = await getLinkStats(code);
-        return { code, ...stats };
+      entries.map(async (entry) => {
+        const stats = await getLinkStats(entry.code);
+        return { code: entry.code, stats };
       })
     );
 
-    const links: TrackedLink[] = [];
+    const statsByCode = new Map<string, LinkStats>();
     let hadPartialFailure = false;
 
     settled.forEach((result, index) => {
       if (result.status === "fulfilled") {
-        links.push(result.value);
+        statsByCode.set(result.value.code, result.value.stats);
         return;
       }
 
       const error = result.reason;
       if (isBackendNotFound(error)) {
-        removeTrackedCode(codes[index]);
+        // Remove by the snapshot entry, not just the code: if this code was
+        // re-tracked with a fresh token while the request was in flight
+        // (codes get reused), removing unconditionally would delete that
+        // newer entry and its delete token instead of the stale one that
+        // actually 404'd.
+        removeTrackedEntryIfUnchanged(entries[index]);
         return;
       }
 
       hadPartialFailure = true;
     });
 
+    // Re-read the tracked entries now that the requests (and any 404
+    // removals above) have settled, instead of trusting the snapshot from
+    // the top of this function. A delete or read-only downgrade
+    // (LinksTable's onRemoved/onReadOnly) may have changed storage while
+    // these requests were in flight, and it always writes to storage before
+    // updating local state - so this re-read reflects it, and merging stats
+    // onto it (rather than the stale snapshot) keeps a slow in-flight
+    // refresh from resurrecting a removed row or restoring a revoked token.
+    const currentEntries = getTrackedEntries();
+    const links: TrackedLink[] = [];
+    for (const entry of currentEntries) {
+      const stats = statsByCode.get(entry.code);
+      if (stats) {
+        links.push({ ...entry, ...stats });
+      }
+    }
+
     // Only surface the full-page error state when every single fetch
     // failed (and none of those failures were just stale 404s) - a
     // handful of bad codes shouldn't hide the links that loaded fine.
-    if (codes.length > 0 && links.length === 0 && hadPartialFailure) {
+    if (entries.length > 0 && links.length === 0 && hadPartialFailure) {
       throw new Error("Failed to load any links");
     }
 
@@ -144,8 +169,19 @@ export default function HomePage() {
     };
   }, [refreshLinks]);
 
-  const handleDeleted = (code: string) => {
+  const handleRemoved = (code: string) => {
     setLinks((current) => current.filter((link) => link.code !== code));
+  };
+
+  // The backend rejected this browser's delete token for `code` as
+  // missing/wrong - downgrade it in place so the row switches to the
+  // read-only rendering immediately, without waiting for the next refetch.
+  const handleReadOnly = (code: string) => {
+    setLinks((current) =>
+      current.map((link) =>
+        link.code === code ? { ...link, token: null } : link
+      )
+    );
   };
 
   return (
@@ -213,7 +249,11 @@ export default function HomePage() {
                 hidden for now - try refreshing in a moment.
               </p>
             )}
-            <LinksTable links={links} onDeleted={handleDeleted} />
+            <LinksTable
+              links={links}
+              onRemoved={handleRemoved}
+              onReadOnly={handleReadOnly}
+            />
           </>
         )}
       </section>

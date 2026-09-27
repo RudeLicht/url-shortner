@@ -26,7 +26,7 @@ async function forward(
   const target = `${backendUrl}/api/${path.map(encodeURIComponent).join("/")}${search}`;
 
   const headers = new Headers();
-  for (const name of ["content-type", "accept"]) {
+  for (const name of ["content-type", "accept", "x-delete-token"]) {
     const value = request.headers.get(name);
     if (value) headers.set(name, value);
   }
