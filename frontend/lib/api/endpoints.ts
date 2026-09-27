@@ -5,4 +5,5 @@ export const urlEndpoints = {
   resolve: (code: string) => `/api/v1/url/${encodeURIComponent(code)}`,
   stats: (code: string) => `/api/v1/url/stats/${encodeURIComponent(code)}`,
   delete: (code: string) => `/api/v1/url/${encodeURIComponent(code)}`,
+  update: (code: string) => `/api/v1/url/${encodeURIComponent(code)}`,
 };

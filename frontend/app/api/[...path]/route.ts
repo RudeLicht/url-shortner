@@ -2,6 +2,13 @@
 // so the backend never needs a public URL. BACKEND_INTERNAL_URL is read at
 // request time, so changing it doesn't require a rebuild.
 
+import {
+  checkRateLimit,
+  getClientIp,
+  getCreateLimit,
+  getModifyLimit,
+} from "@/lib/rate-limit";
+
 const STRIPPED_RESPONSE_HEADERS = [
   "connection",
   "keep-alive",
@@ -11,10 +18,40 @@ const STRIPPED_RESPONSE_HEADERS = [
   "content-length",
 ];
 
+// GET/HEAD are read-only and never limited. Writes are split into "create"
+// (POST) and "modify" (PATCH/PUT/DELETE) so they can have different limits.
+const RATE_LIMIT_KIND_BY_METHOD: Record<string, "create" | "modify" | undefined> = {
+  POST: "create",
+  PUT: "modify",
+  PATCH: "modify",
+  DELETE: "modify",
+};
+
+function getLimitForKind(kind: "create" | "modify"): number {
+  return kind === "create" ? getCreateLimit() : getModifyLimit();
+}
+
 async function forward(
   request: Request,
   ctx: RouteContext<"/api/[...path]">
 ): Promise<Response> {
+  const rateLimitKind = RATE_LIMIT_KIND_BY_METHOD[request.method];
+  if (rateLimitKind) {
+    const clientIp = getClientIp(request);
+    const result = checkRateLimit(rateLimitKind, clientIp, getLimitForKind(rateLimitKind));
+    if (!result.allowed) {
+      return Response.json(
+        {
+          message: `Too many requests, try again in ${result.retryAfterSeconds} seconds.`,
+        },
+        {
+          status: 429,
+          headers: { "Retry-After": String(result.retryAfterSeconds) },
+        }
+      );
+    }
+  }
+
   const backendUrl = process.env.BACKEND_INTERNAL_URL;
   if (!backendUrl) {
     console.error("BACKEND_INTERNAL_URL is not set; cannot proxy API request");

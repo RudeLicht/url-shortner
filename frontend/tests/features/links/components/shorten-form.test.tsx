@@ -9,10 +9,12 @@ import { addTrackedEntry, getTrackedEntries } from "@/features/links/utils";
 
 const shortenUrlMock = vi.hoisted(() => vi.fn());
 const getExistingCodeFromConflictMock = vi.hoisted(() => vi.fn());
+const isAliasTakenConflictMock = vi.hoisted(() => vi.fn());
 
 vi.mock("@/features/links/api", () => ({
   shortenUrl: shortenUrlMock,
   getExistingCodeFromConflict: getExistingCodeFromConflictMock,
+  isAliasTakenConflict: isAliasTakenConflictMock,
 }));
 
 vi.mock("sonner", () => ({
@@ -23,6 +25,8 @@ describe("ShortenForm", () => {
   beforeEach(() => {
     shortenUrlMock.mockReset();
     getExistingCodeFromConflictMock.mockReset();
+    isAliasTakenConflictMock.mockReset();
+    isAliasTakenConflictMock.mockReturnValue(false);
     vi.clearAllMocks();
     window.localStorage.clear();
   });
@@ -249,6 +253,9 @@ describe("ShortenForm", () => {
     render(<ShortenForm onCreated={onCreated} />);
 
     await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    // The backend checks URL uniqueness before the alias, so a submitted
+    // alias here is silently dropped - the toast must say so explicitly.
+    await user.type(screen.getByLabelText("Custom alias"), "promo");
     await user.click(screen.getByRole("button", { name: "Shorten" }));
 
     await waitFor(() => {
@@ -259,7 +266,11 @@ describe("ShortenForm", () => {
     expect(onCreated).toHaveBeenCalledTimes(1);
     expect(toast.info).toHaveBeenCalledWith(
       "This URL was already shortened by someone else",
-      expect.objectContaining({ description: expect.any(String) })
+      expect.objectContaining({
+        description: expect.stringContaining(
+          'Your custom alias "promo" was not created.'
+        ),
+      })
     );
   });
 
@@ -289,6 +300,47 @@ describe("ShortenForm", () => {
       "This URL already has a short link",
       expect.objectContaining({ description: undefined })
     );
+  });
+
+  it("on a 409 conflict for a code this browser already owns and a custom alias was submitted, mentions the alias wasn't created", async () => {
+    const user = userEvent.setup();
+    addTrackedEntry("existing1", "token-existing1");
+    const conflictError = new ApiError(409, "URL already shortened", true, {
+      message: "URL already shortened",
+      code: "existing1",
+    });
+    shortenUrlMock.mockRejectedValue(conflictError);
+    getExistingCodeFromConflictMock.mockReturnValue("existing1");
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.type(screen.getByLabelText("Custom alias"), "promo");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(screen.getByText(`${window.location.origin}/existing1`)).toBeInTheDocument();
+    });
+
+    expect(toast.info).toHaveBeenCalledWith(
+      "This URL already has a short link",
+      expect.objectContaining({
+        description: 'Your custom alias "promo" was not created.',
+      })
+    );
+
+    // Re-submitting with an alias that matches the existing code itself
+    // must not claim an alias "wasn't created" - it already is that code.
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.type(screen.getByLabelText("Custom alias"), "existing1");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => {
+      expect(toast.info).toHaveBeenLastCalledWith(
+        "This URL already has a short link",
+        expect.objectContaining({ description: undefined })
+      );
+    });
   });
 
   it("on a 409 conflict for a code already in the list read-only (legacy entry), keeps the existing-link message rather than 'shortened by someone else'", async () => {
@@ -350,6 +402,24 @@ describe("ShortenForm", () => {
     expect(await screen.findByText("Error shortening the URL")).toBeInTheDocument();
   });
 
+  it("shows a friendly message when the proxy rate-limits this browser", async () => {
+    const user = userEvent.setup();
+    shortenUrlMock.mockRejectedValue(
+      new ApiError(429, "Too many requests, try again in 30 seconds.", true, {
+        message: "Too many requests, try again in 30 seconds.",
+      })
+    );
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    expect(
+      await screen.findByText("Too many requests, try again in 30 seconds.")
+    ).toBeInTheDocument();
+  });
+
   it("shows a fallback error message for a non-ApiError failure", async () => {
     const user = userEvent.setup();
     shortenUrlMock.mockRejectedValue(new TypeError("Failed to fetch"));
@@ -363,4 +433,85 @@ describe("ShortenForm", () => {
       await screen.findByText("Something went wrong. Please try again.")
     ).toBeInTheDocument();
   });
+
+  it("sends a valid custom alias in the payload and shows a live preview of the resulting short link, trimming trailing whitespace", async () => {
+    const user = userEvent.setup();
+    shortenUrlMock.mockResolvedValue({
+      url: "https://example.com",
+      short_url: "my-link",
+      expiry: null,
+      delete_token: "token-my-link",
+    });
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    // Trailing whitespace should be trimmed consistently for the preview,
+    // validation and payload rather than only some of them.
+    await user.type(screen.getByLabelText("Custom alias"), "my-link ");
+
+    expect(screen.getByText(`${window.location.origin}/my-link`)).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    await waitFor(() => expect(shortenUrlMock).toHaveBeenCalledTimes(1));
+    expect(shortenUrlMock).toHaveBeenCalledWith({
+      url: "https://example.com",
+      expiry: undefined,
+      alias: "my-link",
+    });
+  });
+
+  it("shows a field error on the alias input when the alias is already taken, without tracking the link", async () => {
+    const user = userEvent.setup();
+    const aliasTakenError = new ApiError(409, "Alias already taken", true, {
+      message: "Alias already taken",
+      error: "alias_taken",
+    });
+    shortenUrlMock.mockRejectedValue(aliasTakenError);
+    getExistingCodeFromConflictMock.mockReturnValue(null);
+    isAliasTakenConflictMock.mockReturnValue(true);
+
+    render(<ShortenForm onCreated={vi.fn()} />);
+
+    await user.type(screen.getByPlaceholderText("Paste a long URL..."), "https://example.com");
+    await user.type(screen.getByLabelText("Custom alias"), "taken");
+    await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+    expect(await screen.findByText("That alias is already taken")).toBeInTheDocument();
+    expect(getTrackedEntries()).toEqual([]);
+  });
+
+  it.each([
+    ["a!", "https://example.com"],
+    ["api", "https://example.com"],
+    // An invalid alias alongside an invalid URL: the alias check is a
+    // field-level refine, so it must still surface even though the URL
+    // field is also invalid.
+    ["a!", "not a url"],
+  ])(
+    "shows a client-side validation error for an invalid alias (%s) without calling the API",
+    async (alias, url) => {
+      const user = userEvent.setup();
+      render(<ShortenForm onCreated={vi.fn()} />);
+
+      await user.type(screen.getByPlaceholderText("Paste a long URL..."), url);
+      await user.type(screen.getByLabelText("Custom alias"), alias);
+      await user.click(screen.getByRole("button", { name: "Shorten" }));
+
+      // The exact error text, not the substring-overlapping "Optional, ..."
+      // hint shown when the alias field has no error.
+      expect(
+        await screen.findByText(
+          "Alias must be 3-20 letters, numbers, - or _, and not a reserved word"
+        )
+      ).toBeInTheDocument();
+      if (url === "not a url") {
+        expect(
+          screen.getByText("Enter a valid http:// or https:// URL")
+        ).toBeInTheDocument();
+      }
+      expect(shortenUrlMock).not.toHaveBeenCalled();
+    }
+  );
 });

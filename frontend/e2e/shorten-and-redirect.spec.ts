@@ -154,4 +154,39 @@ test.describe("shorten, list, and redirect", () => {
       await contextB.close();
     }
   });
+
+  test("shortening with a custom alias, then editing its destination, redirects to the new destination", async ({
+    page,
+  }) => {
+    const alias = `e2e-${Date.now()}`.slice(0, 20);
+    const { url: newTargetUrl, close: closeNewTargetServer } = await startTargetServer();
+
+    try {
+      await page.goto("/");
+
+      await page.getByPlaceholder("Paste a long URL...").fill(targetUrl);
+      await page.getByLabel("Custom alias").fill(alias);
+      await page.getByRole("button", { name: "Shorten" }).click();
+
+      const resultLocator = page.getByText(new RegExp(`^http://127\\.0\\.0\\.1:3100/${alias}$`));
+      await expect(resultLocator).toBeVisible();
+
+      const escaped = targetUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const row = page.getByRole("row", { name: new RegExp(escaped) });
+      await expect(row).toBeVisible();
+
+      await row.getByRole("button", { name: "Edit link" }).click();
+      const urlInput = page.getByLabel("Destination URL");
+      await urlInput.fill(newTargetUrl);
+      await page.getByRole("button", { name: "Save" }).click();
+
+      await expect(page.getByText("Link updated")).toBeVisible();
+
+      await page.goto(`/${alias}`);
+      await expect(page).toHaveURL(newTargetUrl);
+      await expect(page.getByText("E2E TARGET OK")).toBeVisible();
+    } finally {
+      await closeNewTargetServer();
+    }
+  });
 });

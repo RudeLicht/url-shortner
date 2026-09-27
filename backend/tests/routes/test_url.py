@@ -1,6 +1,9 @@
+import re
 from datetime import datetime, timedelta, timezone
 
-import base62
+import pytest
+
+CODE_PATTERN = re.compile(r"^[0-9A-Za-z]{7}$")
 
 
 def test_root_health_route(client):
@@ -15,7 +18,7 @@ def test_post_url_without_trailing_slash_creates_without_redirect(client):
     )
 
     assert response.status_code == 201
-    assert response.json()["short_url"] == base62.encode(1)
+    assert CODE_PATTERN.fullmatch(response.json()["short_url"])
 
 
 def test_post_url_creates_short_url(client):
@@ -24,7 +27,7 @@ def test_post_url_creates_short_url(client):
     assert response.status_code == 201
     body = response.json()
     assert body["url"] == "https://example.com"
-    assert body["short_url"] == base62.encode(1)
+    assert CODE_PATTERN.fullmatch(body["short_url"])
     assert body["expiry"] is None
     assert isinstance(body["delete_token"], str)
     assert body["delete_token"] != ""
@@ -75,12 +78,6 @@ def test_post_url_duplicate_of_expired_url_returns_201_with_new_code(client, db_
     url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
     db_session.commit()
 
-    # Create an unrelated URL *after* the expired one so it isn't the max id
-    # in the table -- SQLite (used in tests) would otherwise reuse that id
-    # for the replacement row once the expired one is deleted, masking what
-    # would be a genuinely new id/code on Postgres in production.
-    client.post("/api/v1/url/", json={"url": "https://unrelated.com"})
-
     response = client.post("/api/v1/url/", json={"url": "https://example.com"})
 
     assert response.status_code == 201
@@ -104,12 +101,60 @@ def test_post_url_wrong_type_returns_422(client):
     assert response.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "not-a-url",
+        "https://:443",
+        "http://user@",
+        "https://exa mple.com",
+        "https://example.com/\u0000",
+    ],
+    ids=[
+        "javascript-scheme",
+        "no-scheme",
+        "empty-host-with-port",
+        "empty-host-with-userinfo",
+        "whitespace-in-host",
+        "control-character",
+    ],
+)
+def test_post_url_invalid_url_returns_422(client, url):
+    response = client.post("/api/v1/url/", json={"url": url})
+    assert response.status_code == 422
+
+
 def test_post_url_past_expiry_returns_400(client):
     past = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     response = client.post(
         "/api/v1/url/", json={"url": "https://example.com", "expiry": past}
     )
     assert response.status_code == 400
+
+
+def test_post_url_with_alias_creates_short_url_with_that_alias(client):
+    response = client.post(
+        "/api/v1/url/", json={"url": "https://example.com", "alias": "my-alias"}
+    )
+
+    assert response.status_code == 201
+    assert response.json()["short_url"] == "my-alias"
+
+    follow_up = client.get("/api/v1/url/my-alias")
+    assert follow_up.status_code == 200
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["!!", "API", "_not-found"],
+    ids=["invalid-pattern", "reserved-case-insensitive", "reserved-not-found"],
+)
+def test_post_url_invalid_alias_returns_422(client, alias):
+    response = client.post(
+        "/api/v1/url/", json={"url": "https://example.com", "alias": alias}
+    )
+    assert response.status_code == 422
 
 
 def test_get_url_returns_json_and_counts_clicks(client):
@@ -242,6 +287,49 @@ def test_delete_url_legacy_row_without_owner_token_hash_returns_403(client, db_s
 
     follow_up = client.get("/api/v1/url/legacycode")
     assert follow_up.status_code == 200
+
+
+def test_patch_url_updates_url_via_delete_token_header(client):
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+    token = created.json()["delete_token"]
+
+    response = client.patch(
+        f"/api/v1/url/{code}",
+        json={"url": "https://updated.example.com"},
+        headers={"X-Delete-Token": token},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["url"] == "https://updated.example.com"
+    assert body["code"] == code
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in body)
+
+    follow_up = client.get(f"/api/v1/url/{code}")
+    assert follow_up.json()["url"] == "https://updated.example.com"
+
+
+def test_patch_url_unknown_code_returns_404(client):
+    response = client.patch(
+        "/api/v1/url/doesnotexist",
+        json={"url": "https://example.com"},
+        headers={"X-Delete-Token": "whatever"},
+    )
+    assert response.status_code == 404
+
+
+def test_patch_url_non_http_url_returns_422(client):
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+    token = created.json()["delete_token"]
+
+    response = client.patch(
+        f"/api/v1/url/{code}",
+        json={"url": "not-a-url"},
+        headers={"X-Delete-Token": token},
+    )
+    assert response.status_code == 422
 
 
 def test_delete_url_403_bodies_are_identical_regardless_of_cause(client, db_session):

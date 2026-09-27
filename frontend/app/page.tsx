@@ -253,6 +253,7 @@ export default function HomePage() {
               links={links}
               onRemoved={handleRemoved}
               onReadOnly={handleReadOnly}
+              onUpdated={() => refreshLinks("manual")}
             />
           </>
         )}

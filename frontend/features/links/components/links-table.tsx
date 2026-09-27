@@ -32,6 +32,8 @@ import {
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
 import { deleteLink } from "@/features/links/api";
+import { EditLinkDialog } from "@/features/links/components/edit-link-dialog";
+import { QrCodeDialog } from "@/features/links/components/qr-code-dialog";
 import {
   expiryTime,
   formatDateTime,
@@ -43,7 +45,11 @@ import {
   markTrackedEntryReadOnly,
   removeTrackedEntry,
 } from "@/features/links/utils";
-import { isBackendForbidden, isBackendNotFound } from "@/lib/api/client";
+import {
+  getRateLimitMessage,
+  isBackendForbidden,
+  isBackendNotFound,
+} from "@/lib/api/client";
 import type { TrackedLink } from "@/features/links/types";
 import { useNow } from "@/hooks/use-now";
 
@@ -53,9 +59,11 @@ type LinksTableProps = {
   onRemoved: (code: string) => void;
   /** Called when the backend rejects this browser's delete token as invalid, so the entry should render read-only from now on. */
   onReadOnly: (code: string) => void;
+  /** Called after a link is edited, so the caller can refresh the list. Optional so callers that don't care about editing (e.g. some tests) can omit it. */
+  onUpdated?: () => void;
 };
 
-export function LinksTable({ links, onRemoved, onReadOnly }: LinksTableProps) {
+export function LinksTable({ links, onRemoved, onReadOnly, onUpdated }: LinksTableProps) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   // Ticks every minute for the countdowns, and exactly when a link expires so
   // its "Expired" badge appears without a page refresh.
@@ -131,13 +139,24 @@ export function LinksTable({ links, onRemoved, onReadOnly }: LinksTableProps) {
                   {copiedCode === link.code ? <CheckIcon /> : <CopyIcon />}
                 </Button>
 
+                <QrCodeDialog code={link.code} />
+
                 {link.token !== null ? (
-                  <DeleteLinkAction
-                    link={link}
-                    token={link.token}
-                    onRemoved={onRemoved}
-                    onReadOnly={onReadOnly}
-                  />
+                  <>
+                    <EditLinkDialog
+                      link={link}
+                      token={link.token}
+                      onUpdated={onUpdated ?? (() => {})}
+                      onReadOnly={onReadOnly}
+                      onRemoved={onRemoved}
+                    />
+                    <DeleteLinkAction
+                      link={link}
+                      token={link.token}
+                      onRemoved={onRemoved}
+                      onReadOnly={onReadOnly}
+                    />
+                  </>
                 ) : (
                   <RemoveFromListAction link={link} onRemoved={onRemoved} />
                 )}
@@ -190,10 +209,16 @@ function DeleteLinkAction({
       toast.success("Link deleted");
       setOpen(false);
     } catch (err) {
-      // A backend 404 means the link is already gone (e.g. deleted from
-      // another tab) - treat that as a successful delete rather than an
-      // error. A non-JSON 404 (e.g. a proxy error page) is still a failure.
-      if (isBackendNotFound(err)) {
+      const rateLimitMessage = getRateLimitMessage(err);
+      // A 429 is transient and says nothing about ownership - the entry must
+      // keep its token (not be downgraded to read-only) and must not be
+      // removed, so the user can just retry shortly.
+      if (rateLimitMessage) {
+        toast.error(rateLimitMessage);
+      } else if (isBackendNotFound(err)) {
+        // A backend 404 means the link is already gone (e.g. deleted from
+        // another tab) - treat that as a successful delete rather than an
+        // error. A non-JSON 404 (e.g. a proxy error page) is still a failure.
         removeTrackedEntry(link.code);
         onRemoved(link.code);
         toast.success("Link deleted");

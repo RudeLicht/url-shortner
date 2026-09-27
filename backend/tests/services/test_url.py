@@ -1,21 +1,26 @@
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
-import base62
 import pytest
 from fastapi import status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from app.features.models.url import Url, UrlStats
+from app.features.schemas.url import UrlUpdate
 from app.features.services.url import (
+    CODE_LENGTH,
     delete_url_function,
     get_url_information,
     get_url_stats_function,
     is_expired,
     shorten_url,
+    update_url_function,
 )
+
+CODE_PATTERN = re.compile(rf"^[0-9A-Za-z]{{{CODE_LENGTH}}}$")
 
 
 # --- is_expired ---------------------------------------------------------
@@ -48,14 +53,14 @@ def test_is_expired_naive_datetime_is_treated_as_utc():
 # --- shorten_url ---------------------------------------------------------
 
 
-def test_shorten_url_creates_row_with_base62_code(db_session):
+def test_shorten_url_creates_row_with_random_code(db_session):
     response = shorten_url("https://example.com", None, db_session)
 
     assert response.status_code == status.HTTP_201_CREATED
 
     url_model = db_session.execute(select(Url)).scalar_one()
     assert url_model.url == "https://example.com"
-    assert url_model.code == base62.encode(url_model.id)
+    assert CODE_PATTERN.fullmatch(url_model.code)
 
     # stats row is created 1:1 alongside the url row
     stats = db_session.execute(select(UrlStats)).scalar_one()
@@ -71,7 +76,7 @@ def test_shorten_url_response_body_shape(db_session):
 
     payload = json.loads(body)
     assert payload["url"] == "https://example.com"
-    assert payload["short_url"] == base62.encode(1)
+    assert CODE_PATTERN.fullmatch(payload["short_url"])
     assert payload["expiry"] is None
     assert isinstance(payload["delete_token"], str)
     assert payload["delete_token"] != ""
@@ -99,7 +104,45 @@ def test_shorten_url_multiple_urls_yield_distinct_codes(db_session):
     assert r1.status_code == status.HTTP_201_CREATED
     assert r2.status_code == status.HTTP_201_CREATED
     assert len(codes) == 2
-    assert codes == {base62.encode(row.id) for row in rows}
+    assert all(CODE_PATTERN.fullmatch(code) for code in codes)
+
+
+def test_shorten_url_retries_on_code_collision(db_session, monkeypatch):
+    existing = Url(url="https://existing.example.com", code="AAAAAAA", expiry=None)
+    db_session.add(existing)
+    db_session.commit()
+
+    candidates = iter(["AAAAAAA", "BBBBBBB"])
+    monkeypatch.setattr(
+        "app.features.services.url._generate_code", lambda: next(candidates)
+    )
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_201_CREATED
+    payload = json.loads(response.body)
+    assert payload["short_url"] == "BBBBBBB"
+
+
+def test_shorten_url_returns_500_when_all_code_attempts_collide(db_session, monkeypatch):
+    existing = Url(url="https://existing.example.com", code="AAAAAAA", expiry=None)
+    db_session.add(existing)
+    db_session.commit()
+
+    monkeypatch.setattr(
+        "app.features.services.url._generate_code", lambda: "AAAAAAA"
+    )
+
+    response = shorten_url("https://example.com", None, db_session)
+
+    assert response.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+    payload = json.loads(response.body)
+    assert payload == {"message": "Error shortening the URL"}
+
+    rows = db_session.execute(
+        select(Url).where(Url.url == "https://example.com")
+    ).scalars().all()
+    assert rows == []
 
 
 def test_shorten_url_distinct_links_get_distinct_delete_tokens(db_session):
@@ -142,30 +185,19 @@ def test_shorten_url_duplicate_of_expired_url_replaces_row_with_new_code(db_sess
     future = datetime.now(timezone.utc) + timedelta(days=1)
     # The service itself rejects an already-past expiry, so create the
     # soon-to-be-expired row via the service with a future expiry (giving it
-    # a realistic base62 code), then flip its expiry into the past directly
+    # a realistic random code), then flip its expiry into the past directly
     # to simulate a link that was valid when created and has since expired.
     create_response = shorten_url("https://example.com", future, db_session)
     old_code = json.loads(create_response.body)["short_url"]
     old_url_model = db_session.execute(select(Url)).scalar_one()
-    old_id = old_url_model.id
 
     # Register a couple of clicks so the cascade-delete of the stats row is
     # actually meaningful (not just deleting an already-empty row).
     get_url_information(old_code, db_session)
     get_url_information(old_code, db_session)
-    old_stats_id = old_url_model.stats.id
 
     old_url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
     db_session.commit()
-
-    # Create an unrelated URL *after* the expired one so the expired row is
-    # not the highest id in the table. SQLite (used in these tests) reuses
-    # the max rowid once the row holding it is deleted, since the `id`
-    # column isn't declared with the AUTOINCREMENT keyword. Without this,
-    # the replacement row would coincidentally land on the exact same id
-    # (and therefore the same base62 code) as the row it replaced, masking
-    # what would be a genuinely new id on Postgres in production.
-    shorten_url("https://unrelated.com", None, db_session)
 
     new_expiry = datetime.now(timezone.utc) + timedelta(days=2)
     response = shorten_url("https://example.com", new_expiry, db_session)
@@ -175,15 +207,10 @@ def test_shorten_url_duplicate_of_expired_url_replaces_row_with_new_code(db_sess
     new_code = payload["short_url"]
     assert new_code != old_code
 
-    # The old row -- and its stats row, via cascade -- is gone.
+    # The old row -- and its stats row, via cascade -- is gone: no row keeps
+    # the old code anymore.
     assert (
-        db_session.execute(select(Url).where(Url.id == old_id)).scalar_one_or_none()
-        is None
-    )
-    assert (
-        db_session.execute(
-            select(UrlStats).where(UrlStats.id == old_stats_id)
-        ).scalar_one_or_none()
+        db_session.execute(select(Url).where(Url.code == old_code)).scalar_one_or_none()
         is None
     )
 
@@ -194,9 +221,7 @@ def test_shorten_url_duplicate_of_expired_url_replaces_row_with_new_code(db_sess
     ).scalars().all()
     assert len(rows) == 1
     new_url_model = rows[0]
-    assert new_url_model.id != old_id
     assert new_url_model.code == new_code
-    assert new_url_model.code == base62.encode(new_url_model.id)
 
     stats_rows = db_session.execute(
         select(UrlStats).where(UrlStats.url_id == new_url_model.id)
@@ -450,6 +475,87 @@ def test_shorten_url_with_past_expiry_returns_400(db_session):
     assert rows == []
 
 
+# --- shorten_url (alias) --------------------------------------------------
+
+
+def test_shorten_url_with_alias_uses_it_as_code(db_session):
+    response = shorten_url("https://example.com", None, db_session, alias="my-alias")
+
+    assert response.status_code == status.HTTP_201_CREATED
+    payload = json.loads(response.body)
+    assert payload["short_url"] == "my-alias"
+
+    url_model = db_session.execute(select(Url)).scalar_one()
+    assert url_model.code == "my-alias"
+
+
+def test_shorten_url_alias_already_taken_returns_409(db_session):
+    shorten_url("https://example.com/one", None, db_session, alias="taken")
+
+    response = shorten_url("https://example.com/two", None, db_session, alias="taken")
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "Alias already taken", "error": "alias_taken"}
+    assert "code" not in payload
+
+    rows = db_session.execute(
+        select(Url).where(Url.url == "https://example.com/two")
+    ).scalars().all()
+    assert rows == []
+
+
+def test_shorten_url_cannot_reclaim_expired_alias_without_token(db_session):
+    # A POST has no ownership proof. Even when the POST targets the exact
+    # same url+alias as an existing (now expired) row, anyone could send it,
+    # so it must not be able to delete that row and steal its alias -- the
+    # owner must instead revive it via PATCH with their delete token.
+    create_response = shorten_url(
+        "https://x.example", None, db_session, alias="mine"
+    )
+    assert create_response.status_code == status.HTTP_201_CREATED
+
+    url_model = db_session.execute(select(Url)).scalar_one()
+    old_id = url_model.id
+    url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    response = shorten_url("https://x.example", None, db_session, alias="mine")
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "Alias already taken", "error": "alias_taken"}
+    assert "delete_token" not in payload
+
+    db_session.expire_all()
+    rows = db_session.execute(
+        select(Url).where(Url.url == "https://x.example")
+    ).scalars().all()
+    assert len(rows) == 1
+    assert rows[0].id == old_id
+    assert rows[0].code == "mine"
+    assert is_expired(rows[0].expiry)
+
+
+def test_shorten_url_duplicate_live_url_with_alias_still_returns_duplicate_conflict(
+    db_session,
+):
+    first = shorten_url("https://example.com", None, db_session)
+    original_code = json.loads(first.body)["short_url"]
+
+    response = shorten_url("https://example.com", None, db_session, alias="wanted")
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "URL already shortened", "code": original_code}
+
+    # The alias must not have been consumed by the rejected request.
+    assert (
+        db_session.execute(select(Url).where(Url.code == "wanted")).scalar_one_or_none()
+        is None
+    )
+
+
 # --- get_url_information --------------------------------------------------
 
 
@@ -645,3 +751,147 @@ def test_delete_url_403_bodies_are_identical_regardless_of_cause(db_session):
     assert statuses == [status.HTTP_403_FORBIDDEN] * 3
     assert bodies[0] == bodies[1] == bodies[2]
     assert bodies[0] == {"message": "You are not allowed to delete this URL"}
+
+
+# --- update_url_function -------------------------------------------------
+
+
+def test_update_url_owner_updates_url_and_revives_expired_link(db_session):
+    create_response = shorten_url("https://example.com", None, db_session)
+    token = json.loads(create_response.body)["delete_token"]
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    # Simulate a link that has since expired.
+    url_model.expiry = datetime.now(timezone.utc) - timedelta(seconds=1)
+    db_session.commit()
+
+    new_expiry = datetime.now(timezone.utc) + timedelta(days=1)
+    data = UrlUpdate(url="https://updated.example.com", expiry=new_expiry)
+
+    response = update_url_function(code, token, data, db_session)
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = json.loads(response.body)
+    assert payload["url"] == "https://updated.example.com"
+    assert payload["code"] == code
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in payload)
+
+    db_session.refresh(url_model)
+    assert url_model.url == "https://updated.example.com"
+    assert is_expired(url_model.expiry) is False
+
+
+def test_update_url_expiry_omitted_leaves_unchanged_but_explicit_null_clears_it(
+    db_session,
+):
+    future = datetime.now(timezone.utc) + timedelta(days=1)
+    create_response = shorten_url("https://example.com", future, db_session)
+    token = json.loads(create_response.body)["delete_token"]
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    omitted_response = update_url_function(code, token, UrlUpdate(), db_session)
+    assert omitted_response.status_code == status.HTTP_200_OK
+    db_session.refresh(url_model)
+    assert url_model.expiry is not None
+
+    clearing_response = update_url_function(
+        code, token, UrlUpdate(expiry=None), db_session
+    )
+    assert clearing_response.status_code == status.HTTP_200_OK
+    db_session.refresh(url_model)
+    assert url_model.expiry is None
+
+
+def test_update_url_past_expiry_returns_400(db_session):
+    create_response = shorten_url("https://example.com", None, db_session)
+    token = json.loads(create_response.body)["delete_token"]
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    past = datetime.now(timezone.utc) - timedelta(days=1)
+    response = update_url_function(code, token, UrlUpdate(expiry=past), db_session)
+
+    assert response.status_code == status.HTTP_400_BAD_REQUEST
+    db_session.refresh(url_model)
+    assert url_model.expiry is None
+
+
+@pytest.mark.parametrize(
+    "make_token",
+    [
+        lambda real_token: None,
+        lambda real_token: "wrong-token",
+    ],
+    ids=["missing-token", "wrong-token"],
+)
+def test_update_url_wrong_or_missing_token_returns_403(db_session, make_token):
+    create_response = shorten_url("https://example.com", None, db_session)
+    real_token = json.loads(create_response.body)["delete_token"]
+    url_model = db_session.execute(select(Url)).scalar_one()
+    code = url_model.code
+
+    response = update_url_function(
+        code, make_token(real_token), UrlUpdate(url="https://changed.example.com"), db_session
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to modify this URL"}
+
+    db_session.refresh(url_model)
+    assert url_model.url == "https://example.com"
+
+
+def test_update_url_legacy_row_without_owner_token_hash_returns_403(db_session):
+    legacy = Url(url="https://legacy.example.com", code="legacycode", expiry=None)
+    legacy.stats = UrlStats()
+    db_session.add(legacy)
+    db_session.commit()
+
+    response = update_url_function(
+        "legacycode", "any-token", UrlUpdate(url="https://changed.example.com"), db_session
+    )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+    payload = json.loads(response.body)
+    assert payload == {"message": "You are not allowed to modify this URL"}
+
+    db_session.refresh(legacy)
+    assert legacy.url == "https://legacy.example.com"
+
+
+def test_update_url_conflict_rolls_back_pending_expiry_change(db_session):
+    # Setting a new expiry AND a conflicting (live) url in the same PATCH
+    # must not leave the expiry change applied to the session once the url
+    # conflict is detected and the request is rejected with 409.
+    other_response = shorten_url("https://taken.example.com", None, db_session)
+    other_code = json.loads(other_response.body)["short_url"]
+
+    create_response = shorten_url("https://example.com", None, db_session)
+    token = json.loads(create_response.body)["delete_token"]
+    url_model = db_session.execute(
+        select(Url).where(Url.url == "https://example.com")
+    ).scalar_one()
+    code = url_model.code
+    original_expiry = url_model.expiry
+
+    new_expiry = datetime.now(timezone.utc) + timedelta(days=1)
+    response = update_url_function(
+        code,
+        token,
+        UrlUpdate(url="https://taken.example.com", expiry=new_expiry),
+        db_session,
+    )
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    payload = json.loads(response.body)
+    assert payload == {"message": "URL already shortened", "code": other_code}
+
+    db_session.expire_all()
+    reloaded = db_session.execute(select(Url).where(Url.code == code)).scalar_one()
+    assert reloaded.expiry == original_expiry
+    assert reloaded.url == "https://example.com"
+
+
