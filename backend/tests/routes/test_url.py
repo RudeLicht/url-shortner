@@ -26,6 +26,8 @@ def test_post_url_creates_short_url(client):
     assert body["url"] == "https://example.com"
     assert body["short_url"] == base62.encode(1)
     assert body["expiry"] is None
+    assert isinstance(body["delete_token"], str)
+    assert body["delete_token"] != ""
 
 
 def test_post_url_distinct_codes_for_distinct_urls(client):
@@ -35,6 +37,15 @@ def test_post_url_distinct_codes_for_distinct_urls(client):
     assert r1.status_code == 201
     assert r2.status_code == 201
     assert r1.json()["short_url"] != r2.json()["short_url"]
+    assert r1.json()["delete_token"] != r2.json()["delete_token"]
+
+    # Link 1's token must not be able to delete link 2.
+    cross_delete = client.delete(
+        f"/api/v1/url/{r2.json()['short_url']}",
+        headers={"X-Delete-Token": r1.json()["delete_token"]},
+    )
+    assert cross_delete.status_code == 403
+    assert client.get(f"/api/v1/url/{r2.json()['short_url']}").status_code == 200
 
 
 def test_post_url_duplicate_returns_409(client):
@@ -42,7 +53,9 @@ def test_post_url_duplicate_returns_409(client):
     response = client.post("/api/v1/url/", json={"url": "https://example.com"})
 
     assert response.status_code == 409
-    assert response.json()["code"] == first.json()["short_url"]
+    body = response.json()
+    assert body["code"] == first.json()["short_url"]
+    assert not any("token" in key.lower() or "hash" in key.lower() for key in body)
 
 
 def test_post_url_duplicate_of_expired_url_returns_201_with_new_code(client, db_session):
@@ -106,9 +119,15 @@ def test_get_url_returns_json_and_counts_clicks(client):
     response = client.get(f"/api/v1/url/{code}")
     assert response.status_code == 200
     assert response.json()["url"] == "https://example.com"
+    assert not any(
+        "token" in key.lower() or "hash" in key.lower() for key in response.json()
+    )
 
     stats = client.get(f"/api/v1/url/stats/{code}")
     assert stats.json()["clicks"] == 1
+    assert not any(
+        "token" in key.lower() or "hash" in key.lower() for key in stats.json()
+    )
 
 
 def test_get_url_unknown_code_returns_404(client):
@@ -146,8 +165,11 @@ def test_get_url_stats_unknown_code_returns_404(client):
 def test_delete_url_removes_it(client):
     created = client.post("/api/v1/url/", json={"url": "https://example.com"})
     code = created.json()["short_url"]
+    token = created.json()["delete_token"]
 
-    response = client.delete(f"/api/v1/url/{code}")
+    response = client.delete(
+        f"/api/v1/url/{code}", headers={"X-Delete-Token": token}
+    )
     assert response.status_code == 204
 
     follow_up = client.get(f"/api/v1/url/{code}")
@@ -158,5 +180,90 @@ def test_delete_url_removes_it(client):
 
 
 def test_delete_url_unknown_code_returns_404(client):
-    response = client.delete("/api/v1/url/doesnotexist")
+    response = client.delete(
+        "/api/v1/url/doesnotexist", headers={"X-Delete-Token": "whatever"}
+    )
     assert response.status_code == 404
+
+
+def test_delete_url_missing_token_returns_403(client):
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+
+    response = client.delete(f"/api/v1/url/{code}")
+    assert response.status_code == 403
+    assert response.json() == {"message": "You are not allowed to delete this URL"}
+
+    follow_up = client.get(f"/api/v1/url/{code}")
+    assert follow_up.status_code == 200
+
+
+def test_delete_url_empty_token_returns_403(client):
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+
+    response = client.delete(f"/api/v1/url/{code}", headers={"X-Delete-Token": ""})
+    assert response.status_code == 403
+    assert response.json() == {"message": "You are not allowed to delete this URL"}
+
+    follow_up = client.get(f"/api/v1/url/{code}")
+    assert follow_up.status_code == 200
+
+
+def test_delete_url_wrong_token_returns_403(client):
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+
+    response = client.delete(
+        f"/api/v1/url/{code}", headers={"X-Delete-Token": "wrong-token"}
+    )
+    assert response.status_code == 403
+    assert response.json() == {"message": "You are not allowed to delete this URL"}
+
+    follow_up = client.get(f"/api/v1/url/{code}")
+    assert follow_up.status_code == 200
+
+
+def test_delete_url_legacy_row_without_owner_token_hash_returns_403(client, db_session):
+    # Simulate a pre-existing row created before delete tokens existed:
+    # owner_token_hash is NULL. No token should ever be able to delete it.
+    from app.features.models.url import Url, UrlStats
+
+    legacy = Url(url="https://legacy.example.com", code="legacycode", expiry=None)
+    legacy.stats = UrlStats()
+    db_session.add(legacy)
+    db_session.commit()
+
+    response = client.delete(
+        "/api/v1/url/legacycode", headers={"X-Delete-Token": "any-token"}
+    )
+    assert response.status_code == 403
+    assert response.json() == {"message": "You are not allowed to delete this URL"}
+
+    follow_up = client.get("/api/v1/url/legacycode")
+    assert follow_up.status_code == 200
+
+
+def test_delete_url_403_bodies_are_identical_regardless_of_cause(client, db_session):
+    from app.features.models.url import Url, UrlStats
+
+    created = client.post("/api/v1/url/", json={"url": "https://example.com"})
+    code = created.json()["short_url"]
+
+    legacy = Url(url="https://legacy.example.com", code="legacycode", expiry=None)
+    legacy.stats = UrlStats()
+    db_session.add(legacy)
+    db_session.commit()
+
+    missing = client.delete(f"/api/v1/url/{code}")
+    wrong = client.delete(f"/api/v1/url/{code}", headers={"X-Delete-Token": "wrong"})
+    legacy_response = client.delete(
+        "/api/v1/url/legacycode", headers={"X-Delete-Token": "any-token"}
+    )
+
+    assert [missing.status_code, wrong.status_code, legacy_response.status_code] == [
+        403,
+        403,
+        403,
+    ]
+    assert missing.json() == wrong.json() == legacy_response.json()

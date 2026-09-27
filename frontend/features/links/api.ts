@@ -41,8 +41,11 @@ export function getLinkStats(code: string): Promise<LinkStats> {
   return apiFetch<LinkStats>(urlEndpoints.stats(code));
 }
 
-export function deleteLink(code: string): Promise<void> {
-  return apiFetch<void>(urlEndpoints.delete(code), { method: "DELETE" });
+export function deleteLink(code: string, token: string): Promise<void> {
+  return apiFetch<void>(urlEndpoints.delete(code), {
+    method: "DELETE",
+    headers: { "X-Delete-Token": token },
+  });
 }
 
 /** INCREMENTS clicks - only use this for actually resolving a redirect. */

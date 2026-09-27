@@ -35,6 +35,11 @@ class Url(Base):
         nullable=True,
     )
 
+    owner_token_hash: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+
     stats: Mapped["UrlStats"] = relationship(
         back_populates="url",
         uselist=False,

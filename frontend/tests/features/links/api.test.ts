@@ -44,12 +44,15 @@ describe("links api request shapes", () => {
     expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/url/stats/abc%20123");
   });
 
-  it("deleteLink DELETEs the resource endpoint for the given code", async () => {
+  it("deleteLink DELETEs the resource endpoint for the given code with the delete token header", async () => {
     apiFetchMock.mockResolvedValue(undefined);
 
-    await deleteLink("abc123");
+    await deleteLink("abc123", "secret-token");
 
-    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/url/abc123", { method: "DELETE" });
+    expect(apiFetchMock).toHaveBeenCalledWith("/api/v1/url/abc123", {
+      method: "DELETE",
+      headers: { "X-Delete-Token": "secret-token" },
+    });
   });
 
   it("getLinkForRedirect GETs the resolve endpoint for the given code", async () => {

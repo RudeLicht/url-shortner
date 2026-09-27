@@ -52,6 +52,38 @@ describe("API proxy route", () => {
     expect(response.status).toBe(409);
   });
 
+  it("forwards the X-Delete-Token header to the backend on DELETE", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await DELETE(
+      new Request("http://frontend.test/api/v1/url/abc", {
+        method: "DELETE",
+        headers: { "X-Delete-Token": "secret-token" },
+      }),
+      ctx(["v1", "url", "abc"])
+    );
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.get("x-delete-token")).toBe("secret-token");
+  });
+
+  it("does not forward a non-allowlisted header (e.g. cookie or authorization)", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ ok: true }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await GET(
+      new Request("http://frontend.test/api/v1/url/abc", {
+        headers: { cookie: "session=abc123", authorization: "Bearer xyz" },
+      }),
+      ctx(["v1", "url", "abc"])
+    );
+
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.headers.get("cookie")).toBeNull();
+    expect(init.headers.get("authorization")).toBeNull();
+  });
+
   it("returns an empty body for a 204 from the backend", async () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(null, { status: 204 })));
 

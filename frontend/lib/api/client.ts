@@ -38,6 +38,17 @@ export function isBackendNotFound(err: unknown): boolean {
   return err instanceof ApiError && err.status === 404 && err.isJson;
 }
 
+/**
+ * True when `err` is the backend's own "forbidden" response - a 403 whose
+ * body actually parsed as JSON (e.g. a missing/wrong delete token, or a
+ * legacy link with no owner hash). A non-JSON 403 (e.g. a Cloudflare bot
+ * challenge page) is not a genuine ownership refusal and should not be
+ * treated as one.
+ */
+export function isBackendForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 403 && err.isJson;
+}
+
 type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };

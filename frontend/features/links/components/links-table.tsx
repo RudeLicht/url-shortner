@@ -1,7 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { CheckIcon, CopyIcon, ExternalLinkIcon, Trash2Icon } from "lucide-react";
+import {
+  CheckIcon,
+  CopyIcon,
+  ExternalLinkIcon,
+  ListXIcon,
+  Trash2Icon,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -32,17 +38,24 @@ import {
   formatRelative,
   isExpired,
 } from "@/features/links/expiry";
-import { buildShortUrl, removeTrackedCode } from "@/features/links/utils";
-import { isBackendNotFound } from "@/lib/api/client";
+import {
+  buildShortUrl,
+  markTrackedEntryReadOnly,
+  removeTrackedEntry,
+} from "@/features/links/utils";
+import { isBackendForbidden, isBackendNotFound } from "@/lib/api/client";
 import type { TrackedLink } from "@/features/links/types";
 import { useNow } from "@/hooks/use-now";
 
 type LinksTableProps = {
   links: TrackedLink[];
-  onDeleted: (code: string) => void;
+  /** Called both when a link is actually deleted and when a read-only entry is just removed from this browser's list. */
+  onRemoved: (code: string) => void;
+  /** Called when the backend rejects this browser's delete token as invalid, so the entry should render read-only from now on. */
+  onReadOnly: (code: string) => void;
 };
 
-export function LinksTable({ links, onDeleted }: LinksTableProps) {
+export function LinksTable({ links, onRemoved, onReadOnly }: LinksTableProps) {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   // Ticks every minute for the countdowns, and exactly when a link expires so
   // its "Expired" badge appears without a page refresh.
@@ -90,6 +103,14 @@ export function LinksTable({ links, onDeleted }: LinksTableProps) {
                 {isExpired(link.expiry, now) && (
                   <Badge variant="destructive">Expired</Badge>
                 )}
+                {link.token === null && (
+                  <Badge
+                    variant="secondary"
+                    title="This browser doesn't hold a delete key for this link (it was shortened elsewhere, or before delete keys existed). You can remove it from your list."
+                  >
+                    Read-only
+                  </Badge>
+                )}
               </div>
             </TableCell>
             <TableCell className="max-w-xs truncate text-muted-foreground">
@@ -110,7 +131,16 @@ export function LinksTable({ links, onDeleted }: LinksTableProps) {
                   {copiedCode === link.code ? <CheckIcon /> : <CopyIcon />}
                 </Button>
 
-                <DeleteLinkAction link={link} onDeleted={onDeleted} />
+                {link.token !== null ? (
+                  <DeleteLinkAction
+                    link={link}
+                    token={link.token}
+                    onRemoved={onRemoved}
+                    onReadOnly={onReadOnly}
+                  />
+                ) : (
+                  <RemoveFromListAction link={link} onRemoved={onRemoved} />
+                )}
               </div>
             </TableCell>
           </TableRow>
@@ -137,19 +167,26 @@ function ExpiryCell({ expiry, now }: { expiry: string | null; now: number }) {
 
 type DeleteLinkActionProps = {
   link: TrackedLink;
-  onDeleted: (code: string) => void;
+  token: string;
+  onRemoved: (code: string) => void;
+  onReadOnly: (code: string) => void;
 };
 
-function DeleteLinkAction({ link, onDeleted }: DeleteLinkActionProps) {
+function DeleteLinkAction({
+  link,
+  token,
+  onRemoved,
+  onReadOnly,
+}: DeleteLinkActionProps) {
   const [open, setOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const handleDelete = async () => {
     setDeleting(true);
     try {
-      await deleteLink(link.code);
-      removeTrackedCode(link.code);
-      onDeleted(link.code);
+      await deleteLink(link.code, token);
+      removeTrackedEntry(link.code);
+      onRemoved(link.code);
       toast.success("Link deleted");
       setOpen(false);
     } catch (err) {
@@ -157,11 +194,26 @@ function DeleteLinkAction({ link, onDeleted }: DeleteLinkActionProps) {
       // another tab) - treat that as a successful delete rather than an
       // error. A non-JSON 404 (e.g. a proxy error page) is still a failure.
       if (isBackendNotFound(err)) {
-        removeTrackedCode(link.code);
-        onDeleted(link.code);
+        removeTrackedEntry(link.code);
+        onRemoved(link.code);
         toast.success("Link deleted");
         setOpen(false);
+      } else if (isBackendForbidden(err)) {
+        // The backend has rejected this browser's token as missing/wrong (or
+        // the link predates delete tokens) - it will never succeed again, so
+        // downgrade the entry to read-only rather than leaving it stuck
+        // showing a Delete button that always fails.
+        markTrackedEntryReadOnly(link.code);
+        onReadOnly(link.code);
+        toast.error("You can't delete this link", {
+          description:
+            "It's now shown read-only in your list - you can remove it from there.",
+        });
+        setOpen(false);
       } else {
+        // Any other failure - including a non-JSON 403, e.g. a Cloudflare
+        // challenge page - is treated as transient, not an ownership
+        // refusal, so the entry and dialog are left as-is.
         toast.error("Couldn't delete link, please try again");
       }
     } finally {
@@ -201,5 +253,35 @@ function DeleteLinkAction({ link, onDeleted }: DeleteLinkActionProps) {
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
+  );
+}
+
+type RemoveFromListActionProps = {
+  link: TrackedLink;
+  onRemoved: (code: string) => void;
+};
+
+/**
+ * For read-only (not owned by this browser) links: only removes the entry
+ * from this browser's local list, no API call - there's no delete token to
+ * send, so the backend link itself is left untouched.
+ */
+function RemoveFromListAction({ link, onRemoved }: RemoveFromListActionProps) {
+  const handleRemove = () => {
+    removeTrackedEntry(link.code);
+    onRemoved(link.code);
+    toast.success("Removed from your list");
+  };
+
+  return (
+    <Button
+      variant="ghost"
+      size="icon-sm"
+      aria-label="Remove from list"
+      title="Remove from your list (this doesn't delete the link)"
+      onClick={handleRemove}
+    >
+      <ListXIcon />
+    </Button>
   );
 }

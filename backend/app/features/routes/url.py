@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Header
 from sqlalchemy.orm import Session
 from app.features.services.url import shorten_url, get_url_information, delete_url_function, get_url_stats_function
 from app.core.database.db import get_db
@@ -26,5 +26,9 @@ async def get_url_stats(code: str, session: Session = Depends(get_db)):
 
 
 @router.delete("/{code}")
-async def delete_url(code: str, session: Session = Depends(get_db)):
-    return delete_url_function(code, session)
+async def delete_url(
+    code: str,
+    delete_token: str | None = Header(None, alias="X-Delete-Token"),
+    session: Session = Depends(get_db),
+):
+    return delete_url_function(code, delete_token, session)
