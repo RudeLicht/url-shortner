@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
+import { toast } from "sonner";
 
 import HomePage from "@/app/page";
 import { ApiError } from "@/lib/api/client";
@@ -28,6 +29,7 @@ describe("HomePage", () => {
     deleteLinkMock.mockReset();
     shortenUrlMock.mockReset();
     getExistingCodeFromConflictMock.mockReset();
+    vi.mocked(toast.error).mockReset();
     window.localStorage.clear();
   });
 
@@ -128,5 +130,77 @@ describe("HomePage", () => {
       expect(screen.getByText("/newcode1")).toBeInTheDocument();
     });
     expect(getLinkStatsMock).toHaveBeenCalledWith("newcode1");
+  });
+
+  it("refreshes the stats in place when Refresh is clicked", async () => {
+    addTrackedCode("abc123");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    const user = userEvent.setup();
+    render(<HomePage />);
+    expect(await screen.findByText("5")).toBeInTheDocument();
+
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 9,
+      expiry: null,
+    });
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    expect(await screen.findByText("9")).toBeInTheDocument();
+    expect(screen.queryByText("Loading your links...")).not.toBeInTheDocument();
+  });
+
+  it("keeps the table and shows a toast when a manual refresh fails", async () => {
+    addTrackedCode("abc123");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    const user = userEvent.setup();
+    render(<HomePage />);
+    expect(await screen.findByText("/abc123")).toBeInTheDocument();
+
+    getLinkStatsMock.mockRejectedValue(new ApiError(500, "boom", true, {}));
+    await user.click(screen.getByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Couldn't refresh your links");
+    });
+    expect(screen.getByText("/abc123")).toBeInTheDocument();
+    expect(screen.queryByText("Couldn't load your links")).not.toBeInTheDocument();
+  });
+
+  it("refetches quietly when the tab becomes visible again", async () => {
+    addTrackedCode("abc123");
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 5,
+      expiry: null,
+    });
+
+    render(<HomePage />);
+    expect(await screen.findByText("5")).toBeInTheDocument();
+
+    getLinkStatsMock.mockResolvedValue({
+      url: "https://example.com",
+      clicks: 12,
+      expiry: null,
+    });
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    try {
+      document.dispatchEvent(new Event("visibilitychange"));
+      expect(await screen.findByText("12")).toBeInTheDocument();
+    } finally {
+      visibility.mockRestore();
+    }
   });
 });

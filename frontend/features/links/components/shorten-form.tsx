@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { CheckIcon, CopyIcon } from "lucide-react";
@@ -9,8 +9,9 @@ import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
 import { getExistingCodeFromConflict, shortenUrl } from "@/features/links/api";
+import { ExpiryPicker } from "@/features/links/components/expiry-picker";
+import { combineDateAndTime, resolveExpiry } from "@/features/links/expiry";
 import { addTrackedCode, buildShortUrl } from "@/features/links/utils";
 import { ApiError } from "@/lib/api/client";
 
@@ -20,56 +21,83 @@ const formSchema = z
       protocol: /^https?$/,
       error: "Enter a valid http:// or https:// URL",
     }),
-    expiry: z.string().optional(),
+    expiryPreset: z.enum(["never", "1h", "1d", "7d", "30d", "custom"]),
+    customDate: z.date().optional(),
+    customTime: z.string(),
   })
   .refine(
     (data) => {
-      if (!data.expiry) return true;
-      const date = new Date(data.expiry);
-      return !Number.isNaN(date.getTime()) && date.getTime() > Date.now();
+      if (data.expiryPreset !== "custom") return true;
+      const expiry = combineDateAndTime(data.customDate, data.customTime);
+      return expiry !== null && expiry.getTime() > Date.now();
     },
     {
       message: "Expiry must be a valid date in the future",
-      path: ["expiry"],
+      path: ["customDate"],
     }
   );
 
 type FormValues = z.infer<typeof formSchema>;
+
+const DEFAULT_VALUES: FormValues = {
+  url: "",
+  expiryPreset: "never",
+  customDate: undefined,
+  customTime: "12:00",
+};
+
+/** Presets resolve relative to the moment of submitting, not of picking. */
+function toRequestExpiry(values: FormValues): Date | null {
+  return resolveExpiry(
+    values.expiryPreset,
+    combineDateAndTime(values.customDate, values.customTime),
+    Date.now()
+  );
+}
 
 type ShortenFormProps = {
   onCreated: () => void;
 };
 
 export function ShortenForm({ onCreated }: ShortenFormProps) {
-  const [showExpiry, setShowExpiry] = useState(false);
   const [result, setResult] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const {
     register,
+    control,
     handleSubmit,
     reset,
     setError,
+    setValue,
+    clearErrors,
     formState: { errors, isSubmitting },
   } = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { url: "", expiry: "" },
+    defaultValues: DEFAULT_VALUES,
   });
 
+  const [expiryPreset, customDate, customTime] = useWatch({
+    control,
+    name: ["expiryPreset", "customDate", "customTime"],
+  });
+
+  // Any change to the expiry choice clears its error; it's re-checked on submit.
+  const clearExpiryErrors = () => clearErrors(["expiryPreset", "customDate"]);
+
   const onSubmit = async (values: FormValues) => {
+    const expiry = toRequestExpiry(values);
+
     try {
       const response = await shortenUrl({
         url: values.url,
-        expiry: values.expiry
-          ? new Date(values.expiry).toISOString()
-          : undefined,
+        expiry: expiry?.toISOString(),
       });
 
       addTrackedCode(response.short_url);
       setResult(response.short_url);
       setCopied(false);
-      reset({ url: "", expiry: "" });
-      setShowExpiry(false);
+      reset(DEFAULT_VALUES);
       onCreated();
     } catch (error) {
       if (error instanceof ApiError) {
@@ -77,13 +105,12 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
           const existingCode = getExistingCodeFromConflict(error);
           if (existingCode) {
             addTrackedCode(existingCode);
-            reset({ url: "", expiry: "" });
-            setShowExpiry(false);
+            reset(DEFAULT_VALUES);
             setResult(existingCode);
             setCopied(false);
             onCreated();
             toast.info("This URL already has a short link", {
-              description: values.expiry
+              description: expiry
                 ? "The expiry you set wasn't applied - the existing link's expiry was kept."
                 : undefined,
             });
@@ -95,7 +122,7 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
           return;
         }
         if (error.status === 400) {
-          setError("expiry", { message: error.message });
+          setError("expiryPreset", { message: error.message });
           return;
         }
         setError("root", { message: error.message });
@@ -147,34 +174,24 @@ export function ShortenForm({ onCreated }: ShortenFormProps) {
         </Button>
       </form>
 
-      <div className="flex flex-col gap-1.5">
-        <button
-          type="button"
-          onClick={() => setShowExpiry((current) => !current)}
-          className="self-start text-xs text-muted-foreground underline-offset-4 hover:text-foreground hover:underline"
-        >
-          {showExpiry ? "Remove expiry" : "Add an expiry date"}
-        </button>
-        {showExpiry && (
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="expiry" className="sr-only">
-              Expiry
-            </Label>
-            <Input
-              id="expiry"
-              type="datetime-local"
-              aria-invalid={!!errors.expiry}
-              className="max-w-xs"
-              {...register("expiry")}
-            />
-            {errors.expiry && (
-              <p className="text-sm text-destructive">
-                {errors.expiry.message}
-              </p>
-            )}
-          </div>
-        )}
-      </div>
+      <ExpiryPicker
+        preset={expiryPreset}
+        onPresetChange={(value) => {
+          setValue("expiryPreset", value);
+          clearExpiryErrors();
+        }}
+        customDate={customDate}
+        onCustomDateChange={(value) => {
+          setValue("customDate", value);
+          clearExpiryErrors();
+        }}
+        customTime={customTime}
+        onCustomTimeChange={(value) => {
+          setValue("customTime", value);
+          clearExpiryErrors();
+        }}
+        error={errors.customDate?.message ?? errors.expiryPreset?.message}
+      />
 
       {errors.root && (
         <p className="text-sm text-destructive">{errors.root.message}</p>

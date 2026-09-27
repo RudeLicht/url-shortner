@@ -47,14 +47,6 @@ describe("CodePage", () => {
     expect(redirectMock).not.toHaveBeenCalled();
   });
 
-  it("renders a not-found state for a reserved code, without calling the backend", async () => {
-    const result = await CodePage({ params: Promise.resolve({ code: "dashboard" }) });
-    render(result);
-
-    expect(screen.getByText("Link not found")).toBeInTheDocument();
-    expect(getLinkForRedirectMock).not.toHaveBeenCalled();
-  });
-
   it("renders an expired state for a 410 from the backend", async () => {
     getLinkForRedirectMock.mockRejectedValue(
       new ApiError(410, "URL has expired", true, { message: "URL has expired" })

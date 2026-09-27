@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { toast } from "sonner";
 
@@ -52,6 +52,31 @@ describe("LinksTable", () => {
     expect(screen.getByText("Expired")).toBeInTheDocument();
     // Only one expired badge should be rendered, for expiredLink.
     expect(screen.getAllByText("Expired")).toHaveLength(1);
+  });
+
+  it("shows the Expired badge the moment a link expires, without new props", () => {
+    vi.useFakeTimers();
+    try {
+      const soonLink: TrackedLink = {
+        code: "soon1",
+        url: "https://example.com/soon",
+        clicks: 0,
+        expiry: new Date(Date.now() + 5_000).toISOString(),
+      };
+
+      render(<LinksTable links={[soonLink]} onDeleted={vi.fn()} />);
+      expect(screen.queryByText("Expired")).not.toBeInTheDocument();
+      expect(screen.getByText("in less than a minute")).toBeInTheDocument();
+
+      act(() => {
+        vi.advanceTimersByTime(5_000);
+      });
+
+      expect(screen.getByText("Expired")).toBeInTheDocument();
+      expect(screen.queryByText("in less than a minute")).not.toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("copies the short link to the clipboard", async () => {

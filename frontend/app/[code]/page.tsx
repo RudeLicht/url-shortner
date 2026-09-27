@@ -4,7 +4,6 @@ import { ClockIcon, LinkIcon, TriangleAlertIcon } from "lucide-react";
 import { ErrorState } from "@/components/shared/error-state";
 import { getLinkForRedirect } from "@/features/links/api";
 import { ApiError } from "@/lib/api/client";
-import { isReservedCode } from "@/lib/constants";
 
 type CodePageProps = {
   params: Promise<{ code: string }>;
@@ -16,29 +15,23 @@ export default async function CodePage({ params }: CodePageProps) {
   let destination: string | null = null;
   let errorStatus: 404 | 410 | "unknown" | "invalid" | null = null;
 
-  if (isReservedCode(code)) {
-    // A reserved word can never be a real short code (see lib/constants.ts),
-    // so skip the backend call entirely and go straight to "not found".
-    errorStatus = 404;
-  } else {
-    try {
-      const info = await getLinkForRedirect(code);
-      destination = info.url;
-    } catch (error) {
-      // Any failure here - a 404/410 from the backend, some other API error,
-      // or a plain network failure (fetch itself rejecting) - should fall
-      // back to a friendly error state rather than crashing the page.
-      if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
-        errorStatus = error.status;
-      } else {
-        // Logged server-side (this route runs as a Server Component) so the
-        // actual cause - a backend 500, a network/DNS failure reaching
-        // BACKEND_INTERNAL_URL from this container, a missing env var, etc. -
-        // is visible instead of silently collapsing
-        // into the generic "unknown" error state.
-        console.error(`Failed to resolve short code "${code}":`, error);
-        errorStatus = "unknown";
-      }
+  try {
+    const info = await getLinkForRedirect(code);
+    destination = info.url;
+  } catch (error) {
+    // Any failure here - a 404/410 from the backend, some other API error,
+    // or a plain network failure (fetch itself rejecting) - should fall
+    // back to a friendly error state rather than crashing the page.
+    if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+      errorStatus = error.status;
+    } else {
+      // Logged server-side (this route runs as a Server Component) so the
+      // actual cause - a backend 500, a network/DNS failure reaching
+      // BACKEND_INTERNAL_URL from this container, a missing env var, etc. -
+      // is visible instead of silently collapsing
+      // into the generic "unknown" error state.
+      console.error(`Failed to resolve short code "${code}":`, error);
+      errorStatus = "unknown";
     }
   }
 
