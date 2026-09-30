@@ -1,4 +1,6 @@
-# URL SHORTNER
+# URL SHORTNER: backend
+
+See the [root README](../README.md) for setup and an overview.
 
 ## ENDPOINTS
 
@@ -6,9 +8,5 @@
 - POST -> /api/v1/url (also accepts /api/v1/url/)
 - GET -> /api/v1/url/{code} (resolves the link and counts a click)
 - GET -> /api/v1/url/stats/{code} (read-only, doesn't count a click)
-- DELETE -> /api/v1/url/{code}
-
-### auth (planned, not yet implemented):
-- POST -> /api/auth/signup
-- POST -> /api/auth/signin
-- GET -> /api/auth/me
+- PATCH -> /api/v1/url/{code} (edit `url` / `expiry`, requires `X-Delete-Token`)
+- DELETE -> /api/v1/url/{code} (requires `X-Delete-Token`)
